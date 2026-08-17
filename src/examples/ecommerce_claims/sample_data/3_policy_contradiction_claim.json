@@ -1,0 +1,9 @@
+﻿{
+  "claim_id": "CLM-3003",
+  "customer_id": "CUST-1944",
+  "order_id": "ORD-33109",
+  "claim_type": "refund",
+  "claim_amount": 450.00,
+  "customer_message": "I purchased this coffee espresso machine 9 months ago in November. It has stopped heating water. I want a 100% full cash refund under your 30-day money back return policy.",
+  "attachments": ["https://cdn.store.com/claims/CLM-3003-receipt.pdf"]
+}

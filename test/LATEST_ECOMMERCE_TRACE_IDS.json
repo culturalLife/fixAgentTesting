@@ -1,0 +1,34 @@
+[
+  {
+    "scenario": "1_clean_replacement_claim",
+    "execution_id": "ecom-1_clean_replacement_claim-d2c2c601",
+    "trace_id": "91863ad518ca2d8d748f3e25fad9ad1e",
+    "status": "APPROVED",
+    "approved_amount": 149.99,
+    "response_preview": "Dear Valued Customer,\n\nThank you for reaching out and we sincerely apologize for the inconvenience c..."
+  },
+  {
+    "scenario": "2_ambiguous_partial_claim",
+    "execution_id": "ecom-2_ambiguous_partial_claim-2ecc6203",
+    "trace_id": "8ba78b8c69858a875fa5470b233eebd0",
+    "status": "APPROVED",
+    "approved_amount": 0.0,
+    "response_preview": "Dear Customer (CUST-6310),\n\nThank you for reaching out regarding your tablet (Claim ID: CLM-2002). W..."
+  },
+  {
+    "scenario": "3_policy_contradiction_claim",
+    "execution_id": "ecom-3_policy_contradiction_claim-5784f746",
+    "trace_id": "a7e28f0c2833f4a11f2b50fa138b601a",
+    "status": "REJECTED",
+    "approved_amount": 0.0,
+    "response_preview": "Dear Valued Customer,\n\nThank you for reaching out regarding your recent claim (CLM-3003). After revi..."
+  },
+  {
+    "scenario": "4_negative_constraint_claim",
+    "execution_id": "ecom-4_negative_constraint_claim-dea8f43e",
+    "trace_id": "e9b848d6b2b4c0d3407c41dce7dcf15d",
+    "status": "APPROVED",
+    "approved_amount": 29.99,
+    "response_preview": "['Your defective smart bulb (SKU-9920) is eligible for replacement under our 30-day return policy fo..."
+  }
+]

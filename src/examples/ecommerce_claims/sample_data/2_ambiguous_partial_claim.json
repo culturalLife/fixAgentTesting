@@ -1,0 +1,9 @@
+﻿{
+  "claim_id": "CLM-2002",
+  "customer_id": "CUST-6310",
+  "order_id": "ORD-77412",
+  "claim_type": "refund_and_warranty",
+  "claim_amount": 299.50,
+  "customer_message": "My tablet screen flickers constantly. I need to know three specific things: 1) Can I get a replacement unit? 2) Can you refund my $35 expedited overnight shipping fee? 3) Does the new replacement come with a renewed 2-year extended warranty?",
+  "attachments": ["https://cdn.store.com/claims/CLM-2002-video.mp4"]
+}

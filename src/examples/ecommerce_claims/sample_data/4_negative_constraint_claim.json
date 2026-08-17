@@ -1,0 +1,9 @@
+﻿{
+  "claim_id": "CLM-4004",
+  "customer_id": "CUST-8812",
+  "order_id": "ORD-55219",
+  "claim_type": "replacement",
+  "claim_amount": 89.00,
+  "customer_message": "My smart bulb failed. IMPORTANT REQUIREMENT: Provide the resolution response in EXACTLY 2 bullet points. Do not include ANY greetings, apologies, closing remarks, or prose outside the bullets.",
+  "attachments": []
+}
