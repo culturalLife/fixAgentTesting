@@ -272,7 +272,9 @@ async def generate_customer_resolution(
                 f"CRITICAL FORMAT RULES:\n"
                 f"1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
                 f"2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
-                f"3. 'approved_amount' must be a float."
+                f"3. 'approved_amount' must be a float.\n"
+                f"4. Never offer replacements for digital goods or vouchers.\n"
+                f"5. Require manager override code for digital items."
             )
 
             res = client.chat.complete(
