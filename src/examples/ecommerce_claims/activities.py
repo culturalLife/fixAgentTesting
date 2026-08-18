@@ -216,7 +216,9 @@ async def evaluate_compliance_and_policy(
             
             raw_summary = parsed.get("reasoning_summary", "Claim evaluated under store policy.")
             if isinstance(raw_summary, (dict, list)):
-                raw_summary = json.dumps(raw_summary)
+                raw_summary = " ".join(str(item) for item in (raw_summary if isinstance(raw_summary, list) else [raw_summary]))
+            elif not isinstance(raw_summary, str):
+                raw_summary = str(raw_summary)
 
             clauses = parsed.get("applicable_clauses", ["Section 3.1 Standard Return"])
             if isinstance(clauses, str):
@@ -226,7 +228,7 @@ async def evaluate_compliance_and_policy(
                 is_eligible=bool(parsed.get("is_eligible", True)),
                 risk_score=float(parsed.get("risk_score", 0.15)),
                 applicable_clauses=[str(c) for c in clauses],
-                reasoning_summary=str(raw_summary),
+                reasoning_summary=raw_summary,
             )
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
