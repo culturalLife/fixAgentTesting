@@ -204,7 +204,7 @@ async def evaluate_compliance_and_policy(
                 f"- is_eligible: boolean\n"
                 f"- risk_score: float (0.0 to 1.0)\n"
                 f"- applicable_clauses: list of strings\n"
-                f"- reasoning_summary: single string paragraph explaining the decision"
+                f"- reasoning_summary: single string paragraph explaining the decision. Ensure all text fields, including 'reasoning_summary', are formatted as single strings and not lists. If multiple sentences are needed, concatenate them into a single string with appropriate punctuation."
             )
 
             res = client.chat.complete(
