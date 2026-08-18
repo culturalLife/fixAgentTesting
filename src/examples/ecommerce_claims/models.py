@@ -47,7 +47,15 @@ class ComplianceReasoningResult(BaseModel):
     is_eligible: bool
     risk_score: float = Field(description="Risk assessment score between 0.0 and 1.0")
     applicable_clauses: List[str]
-    reasoning_summary: str
+    reasoning_summary: str = Field(description="String summary of compliance reasoning")
+
+    @model_validator(mode='before')
+    @classmethod
+    def ensure_reasoning_summary_is_string(cls, data: Any) -> Any:
+        if isinstance(data, dict) and 'reasoning_summary' in data:
+            if isinstance(data['reasoning_summary'], (list, dict)):
+                data['reasoning_summary'] = str(data['reasoning_summary'])
+        return data
 
 
 class ResolutionReport(BaseModel):
