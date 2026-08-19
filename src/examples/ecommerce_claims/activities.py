@@ -118,6 +118,8 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
         span.set_attribute("gen_ai.workflow.description", "Dispatch required database and inventory lookup tools to verify order validity.")
 
         tool_results: List[ToolExecutionResult] = []
+        tool_args = {"order_id": claim.order_id, "customer_id": claim.customer_id}
+        inv_args = {"sku": "SKU-9920", "warehouse_id": "WH-EAST-01"}
 
         try:
             # 1. Tool Call: lookup_order_details
