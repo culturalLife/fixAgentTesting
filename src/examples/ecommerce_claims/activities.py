@@ -299,3 +299,5 @@ async def generate_customer_resolution(
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
+
+Add validation logic to ensure 'customer_facing_response' and other string fields are properly terminated and escaped. Implement a helper function to sanitize strings and validate the JSON structure before parsing.
