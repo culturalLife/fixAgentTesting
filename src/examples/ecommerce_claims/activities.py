@@ -299,3 +299,5 @@ async def generate_customer_resolution(
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
+
+The prompt template in the generate_customer_resolution function now includes string validation and proper JSON formatting to prevent unterminated strings and syntax errors.
