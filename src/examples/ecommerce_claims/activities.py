@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import json
 import os
 from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import mistralai.workflows as workflows
 from mistralai.client import Mistral
 
@@ -27,6 +27,9 @@ WORKFLOW_NAME = "ecommerce-claims-triage-workflow"
 
 def _get_mistral_client() -> Mistral:
     api_key = os.getenv("MISTRAL_API_KEY", "")
+    server_url = os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL")
+    if server_url:
+        return Mistral(api_key=api_key, server_url=server_url)
     return Mistral(api_key=api_key)
 
 
@@ -74,7 +77,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 response_format={"type": "json_object"}
             )
             raw_content = res.choices[0].message.content
-            parsed = json.loads(raw_content)
+            parsed = ComplianceReasoningResult.model_validate_json(raw_content)
 
             summary_str = parsed.get("summary", "Customer requested resolution.")
             if isinstance(summary_str, (dict, list)):
@@ -124,6 +127,7 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
             with tracer.start_as_current_span("tool_lookup_order_details") as tool_span:
                 tool_args = {"order_id": claim.order_id, "customer_id": claim.customer_id}
                 tool_span.set_attribute("gen_ai.tool.name", "lookup_order_details")
+                tool_span.set_attribute("gen_ai.tool.call.arguments", json.dumps(tool_args))
                 tool_span.set_attribute("gen_ai.tool.arguments", json.dumps(tool_args))
                 
                 order_data = {
@@ -147,6 +151,7 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
                 with tracer.start_as_current_span("tool_check_warehouse_inventory") as tool_span:
                     inv_args = {"sku": "SKU-9920", "warehouse_id": "WH-EAST-01"}
                     tool_span.set_attribute("gen_ai.tool.name", "check_warehouse_inventory")
+                    tool_span.set_attribute("gen_ai.tool.call.arguments", json.dumps(inv_args))
                     tool_span.set_attribute("gen_ai.tool.arguments", json.dumps(inv_args))
                     
                     inv_data = {"sku": "SKU-9920", "in_stock": 14, "available_for_reship": True}
@@ -193,13 +198,14 @@ async def evaluate_compliance_and_policy(
         span.set_attribute("gen_ai.workflow.description", "Evaluate return window, warranty clauses, and fraud risk score.")
 
         try:
+            tools_json = json.dumps([t.model_dump() for t in tools])
             prompt = (
                 f"You are a compliance officer for e-commerce return policies.\n"
                 f"Evaluate this claim:\n"
                 f"Claim Amount: ${claim.claim_amount}\n"
                 f"Message: {claim.customer_message}\n"
                 f"Category: {classification.claim_category.value}\n"
-                f"Tools Verification: {json.dumps([t.model_dump() for t in tools])}\n\n"
+                f"Tools Verification: {tools_json}\n\n"
                 f"Provide a JSON response with:\n"
                 f"- is_eligible: boolean\n"
                 f"- risk_score: float (0.0 to 1.0)\n"
@@ -212,11 +218,13 @@ async def evaluate_compliance_and_policy(
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
-            parsed = json.loads(res.choices[0].message.content)
-            
+            parsed = ComplianceReasoningResult.model_validate_json(raw_content)
+
             raw_summary = parsed.get("reasoning_summary", "Claim evaluated under store policy.")
             if isinstance(raw_summary, (dict, list)):
-                raw_summary = json.dumps(raw_summary)
+                raw_summary = " ".join(str(item) for item in (raw_summary if isinstance(raw_summary, list) else [raw_summary]))
+            elif not isinstance(raw_summary, str):
+                raw_summary = str(raw_summary)
 
             clauses = parsed.get("applicable_clauses", ["Section 3.1 Standard Return"])
             if isinstance(clauses, str):
@@ -226,7 +234,7 @@ async def evaluate_compliance_and_policy(
                 is_eligible=bool(parsed.get("is_eligible", True)),
                 risk_score=float(parsed.get("risk_score", 0.15)),
                 applicable_clauses=[str(c) for c in clauses],
-                reasoning_summary=str(raw_summary),
+                reasoning_summary=raw_summary,
             )
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
@@ -249,7 +257,7 @@ async def evaluate_compliance_and_policy(
 async def generate_customer_resolution(
     claim: CustomerClaimInput,
     classification: IntakeClassification,
-    compliance: ComplianceReasoningResult
+    compliance: Optional[ComplianceReasoningResult] = None
 ) -> ResolutionReport:
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
@@ -263,16 +271,24 @@ async def generate_customer_resolution(
         span.set_attribute("gen_ai.workflow.description", "Draft polite customer notification and compile final audit resolution report.")
 
         try:
+            if compliance is None:
+                compliance = ComplianceReasoningResult(
+                    is_eligible=False,
+                    risk_score=0.9,
+                    applicable_clauses=["Missing Prior Compliance Evaluation"],
+                    reasoning_summary="Compliance step was missing or unverified in workflow context."
+                )
+
             prompt = (
                 f"You are the final customer resolution specialist.\n"
                 f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
                 f"Customer Message: {claim.customer_message}\n"
                 f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
                 f"Reasoning: {compliance.reasoning_summary}\n\n"
-                f"CRITICAL FORMAT RULES:\n"
-                f"1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
-                f"2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
-                f"3. 'approved_amount' must be a float."
+                "CRITICAL FORMAT RULES:\n"
+                "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
+                "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
+                "3. 'approved_amount' must be a float."
             )
 
             res = client.chat.complete(
@@ -280,7 +296,25 @@ async def generate_customer_resolution(
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
-            parsed = json.loads(res.choices[0].message.content)
+            raw_content = res.choices[0].message.content
+            # Robust JSON parsing with validation and fallback
+            try:
+                # First attempt with basic sanitization
+                sanitized_content = raw_content.strip()
+                parsed = json.loads(sanitized_content)
+            except json.JSONDecodeError:
+                # Fallback: aggressive sanitization for malformed strings
+                sanitized_content = (
+                    raw_content.replace("\n", " ")
+                    .replace("\r", " ")
+                    .replace("\t", " ")
+                    .replace("\"", "'")
+                    .strip()
+                )
+                # Ensure the string is properly terminated
+                if not sanitized_content.endswith("}"):
+                    sanitized_content = sanitized_content.rstrip().rstrip("\"") + "}"
+                parsed = json.loads(sanitized_content)
 
             result = ResolutionReport(
                 claim_id=claim.claim_id,
