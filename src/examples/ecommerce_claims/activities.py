@@ -286,6 +286,13 @@ async def generate_customer_resolution(
                     applicable_clauses=["Missing Prior Compliance Evaluation"],
                     reasoning_summary="Compliance step was missing or unverified in workflow context."
                 )
+            else:
+                compliance = ComplianceReasoningResult(
+                    is_eligible=compliance.is_eligible,
+                    risk_score=compliance.risk_score,
+                    applicable_clauses=compliance.applicable_clauses,
+                    reasoning_summary=compliance.reasoning_summary
+                )
 
             prompt = (
                 f"You are the final customer resolution specialist.\n"
