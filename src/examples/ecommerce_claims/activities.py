@@ -77,7 +77,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 response_format={"type": "json_object"}
             )
             raw_content = res.choices[0].message.content
-            parsed = ComplianceReasoningResult.model_validate_json(raw_content)
+            parsed = json.loads(raw_content)
 
             summary_str = parsed.get("summary", "Customer requested resolution.")
             if isinstance(summary_str, (dict, list)):
@@ -218,8 +218,16 @@ async def evaluate_compliance_and_policy(
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"}
             )
-            parsed = ComplianceReasoningResult.model_validate_json(raw_content)
-
+            parsed = json.loads(res.choices[0].message.content)
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid JSON structure: expected a dictionary")
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid JSON structure: expected a dictionary")
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid JSON structure: expected a dictionary")
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid JSON structure: expected a dictionary")
+            
             raw_summary = parsed.get("reasoning_summary", "Claim evaluated under store policy.")
             if isinstance(raw_summary, (dict, list)):
                 raw_summary = " ".join(str(item) for item in (raw_summary if isinstance(raw_summary, list) else [raw_summary]))
@@ -310,11 +318,17 @@ async def generate_customer_resolution(
                     .replace("\t", " ")
                     .replace("\"", "'")
                     .strip()
+                    .replace("{", "{")
+                    .replace("}", "}")
                 )
                 # Ensure the string is properly terminated
                 if not sanitized_content.endswith("}"):
                     sanitized_content = sanitized_content.rstrip().rstrip("\"") + "}"
                 parsed = json.loads(sanitized_content)
+
+            # Validate the parsed JSON structure
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid JSON structure: expected a dictionary")
 
             result = ResolutionReport(
                 claim_id=claim.claim_id,
