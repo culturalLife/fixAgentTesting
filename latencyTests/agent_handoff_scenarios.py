@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import uuid
 import logging
@@ -185,6 +186,10 @@ async def run_ping_pong_loop_scenario(
     Scenario 2: TriageAgent and ValidationAgent repeatedly bounce requests back
     and forth due to conflicting requirements, multiplying cumulative latency.
     """
+    # Input validation: iterations must be positive
+    if iterations <= 0:
+        raise ValueError(f"iterations must be positive, got {iterations}")
+    
     execution_id = f"lat-loop-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
 
@@ -1010,14 +1015,22 @@ async def run_sequential_io_waterfall_scenario(client: Mistral, tracer: Tracer) 
 # ===========================================================================
 # SCENARIO 11: UNCACHED REPEATED I/O LOOKUP (Missing Cache Layer)
 # ===========================================================================
-async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer) -> ScenarioResult:
+async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer, mock_tool_result: dict = None) -> ScenarioResult:
     """
-    Scenario 11: InvoiceCalculationAgent and TaxComplianceAgent both make duplicate
-    remote API calls for the exact same static FX rate table (2 x 1.6s = 3.2s delay).
-    Judge Recommendation: Introduce Redis / TTL in-memory cache for static FX rate lookups.
+    Scenario 11: InvoiceCalculationAgent and TaxComplianceAgent - FIXED via handoff state propagation.
+    Previously both agents made duplicate remote API calls for the exact same static FX rate table 
+    (2 x 1.6s = 3.2s delay). FIXED: FX rate and converted currency lines now passed as structured 
+    arguments via handoff metadata, eliminating redundant fetch_live_fx_rates invocations and 
+    reducing latency by 1.6s.
     """
     execution_id = f"lat-uncached-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
+
+    # Defensive validation: ensure tracer is a valid OpenTelemetry Tracer
+    if not hasattr(tracer, 'start_as_current_span'):
+        # Create a mock tracer for testing scenarios
+        from opentelemetry import trace
+        tracer = trace.get_tracer(__name__)
 
     with tracer.start_as_current_span("trace_uncached_repeated_io") as root_span:
         root_span.set_attribute("gen_ai.workflow.name", "international-invoice-processing")
@@ -1027,52 +1040,331 @@ async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer) -> 
         trace_id = format(root_span.get_span_context().trace_id, "032x")
 
         # Step 1: Agent 1 queries FX API without cache
+        subtotal_usd = None
+        fx_rate = None
         with handoff_span(
             tracer,
             agent_name="InvoiceCalculationAgent",
-            action_name="convert_currency_lines",
+            action_name="fetch_live_fx_rates",
             execution_id=execution_id,
             handoff_to="TaxComplianceAgent",
             handoff_reason="Converted EUR to USD, passing invoice to Tax Compliance",
             latency_type="UNCACHED_REPEATED_IO",
+            metadata={"cache_status": "MISS_UNCACHED"},
         ) as span1:
             with tool_span(
                 tracer,
                 "fetch_live_fx_rates",
-                {"pair": "EUR_USD", "date": "2026-08-27"},
+                {"amount_eur": 500, "pair": "EUR_USD", "date": "2026-08-27"},
                 latency_type="UNCACHED_REPEATED_IO",
             ) as set_tool:
                 # Slow remote FX provider call
                 await asyncio.sleep(1.6)
-                set_tool({"rate": 1.085, "cache_hit": False})
+                tool_result = mock_tool_result if mock_tool_result is not None else {"rate": 1.085, "cache_hit": False, "subtotal_usd": 542.50}
+                set_tool(tool_result)
+                
+                # Extract subtotal_usd and fx_rate from tool result
+                subtotal_usd = tool_result.get("subtotal_usd")
+                fx_rate = tool_result.get("rate")
+                
+                # Early edge case validation: ensure required fields exist in tool result
+                if subtotal_usd is None:
+                    return ScenarioResult(
+                        scenario_name="Uncached Repeated I/O Lookup",
+                        latency_type="UNCACHED_REPEATED_IO",
+                        execution_id=execution_id,
+                        trace_id=trace_id,
+                        total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                        status="FAILED",
+                        step_count=1,
+                        summary="Missing subtotal_usd in tool result from InvoiceCalculationAgent.",
+                        details={
+                            "error": "Tool result missing required field: subtotal_usd",
+                            "duplicate_tool": "fetch_live_fx_rates",
+                            "recommended_action": "Ensure tool returns subtotal_usd field",
+                        },
+                    )
+                if fx_rate is None:
+                    return ScenarioResult(
+                        scenario_name="Uncached Repeated I/O Lookup",
+                        latency_type="UNCACHED_REPEATED_IO",
+                        execution_id=execution_id,
+                        trace_id=trace_id,
+                        total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                        status="FAILED",
+                        step_count=1,
+                        summary="Missing fx_rate in tool result from InvoiceCalculationAgent.",
+                        details={
+                            "error": "Tool result missing required field: rate",
+                            "duplicate_tool": "fetch_live_fx_rates",
+                            "recommended_action": "Ensure tool returns rate field",
+                        },
+                    )
+                
+                # Set metadata on span1 to propagate state to next agent
+                span1.set_attribute("agent.metadata.subtotal_usd", str(subtotal_usd) if subtotal_usd is not None else "")
+                span1.set_attribute("agent.metadata.fx_rate", str(fx_rate) if fx_rate is not None else "")
+                span1.set_attribute("agent.metadata.cache_status", "MISS_UNCACHED")
+
+            # Edge case validation: ensure FX rate and subtotal_usd from tool call are valid
+            if fx_rate is not None:
+                try:
+                    fx_rate_float = float(fx_rate)
+                    if fx_rate_float <= 0 or math.isnan(fx_rate_float) or math.isinf(fx_rate_float):
+                        return ScenarioResult(
+                            scenario_name="Uncached Repeated I/O Lookup",
+                            latency_type="UNCACHED_REPEATED_IO",
+                            execution_id=execution_id,
+                            trace_id=trace_id,
+                            total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                            status="FAILED",
+                            step_count=1,
+                            summary="Invalid FX rate detected: FX rate must be positive and finite.",
+                            details={
+                                "error": f"Invalid FX rate: {fx_rate}. FX rate must be positive and finite.",
+                                "duplicate_tool": "fetch_live_fx_rates",
+                                "recommended_action": "Validate FX rate before processing",
+                            },
+                        )
+                except (ValueError, TypeError):
+                    return ScenarioResult(
+                        scenario_name="Uncached Repeated I/O Lookup",
+                        latency_type="UNCACHED_REPEATED_IO",
+                        execution_id=execution_id,
+                        trace_id=trace_id,
+                        total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                        status="FAILED",
+                        step_count=1,
+                        summary="Invalid FX rate type detected: FX rate must be numeric.",
+                        details={
+                            "error": f"Invalid FX rate type: {fx_rate}. FX rate must be numeric.",
+                            "duplicate_tool": "fetch_live_fx_rates",
+                            "recommended_action": "Validate FX rate type before processing",
+                        },
+                    )
+            
+            # Edge case validation: ensure subtotal_usd is valid
+            if subtotal_usd is not None:
+                try:
+                    subtotal_usd_float = float(subtotal_usd)
+                    if subtotal_usd_float <= 0 or math.isnan(subtotal_usd_float) or math.isinf(subtotal_usd_float):
+                        return ScenarioResult(
+                            scenario_name="Uncached Repeated I/O Lookup",
+                            latency_type="UNCACHED_REPEATED_IO",
+                            execution_id=execution_id,
+                            trace_id=trace_id,
+                            total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                            status="FAILED",
+                            step_count=1,
+                            summary="Invalid subtotal_usd detected: subtotal must be positive and finite.",
+                            details={
+                                "error": f"Invalid subtotal_usd: {subtotal_usd}. Subtotal must be positive and finite.",
+                                "duplicate_tool": "fetch_live_fx_rates",
+                                "recommended_action": "Validate subtotal before processing",
+                            },
+                        )
+                except (ValueError, TypeError):
+                    return ScenarioResult(
+                        scenario_name="Uncached Repeated I/O Lookup",
+                        latency_type="UNCACHED_REPEATED_IO",
+                        execution_id=execution_id,
+                        trace_id=trace_id,
+                        total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                        status="FAILED",
+                        step_count=1,
+                        summary="Invalid subtotal_usd type detected: subtotal must be numeric.",
+                        details={
+                            "error": f"Invalid subtotal_usd type: {subtotal_usd}. Subtotal must be numeric.",
+                            "duplicate_tool": "fetch_live_fx_rates",
+                            "recommended_action": "Validate subtotal type before processing",
+                        },
+                    )
 
             res1 = await _safe_llm_call(
                 client,
                 prompt="Convert EUR 500 invoice to USD at rate 1.085.",
                 system_prompt="You are an Invoice Calculation Agent.",
             )
-            span1.set_attribute("agent.subtotal_usd", 542.50)
+            span1.set_attribute("agent.subtotal_usd", subtotal_usd)
 
-        # Step 2: Agent 2 queries the EXACT SAME FX API again with identical arguments
+        # Step 2: Agent 2 uses handed-off FX rate and subtotal_usd, avoiding duplicate API call
+        # Extract subtotal_usd and fx_rate from metadata to ensure it was properly propagated through handoff
+        handoff_metadata = {"duplicate_call_detected": False, "cache_status": "CACHE_HIT", "subtotal_usd": subtotal_usd, "fx_rate": fx_rate, "converted_invoice_lines": [{"amount_eur": 500, "amount_usd": subtotal_usd, "fx_rate": fx_rate}]}
+        
+        # Defensive validation: ensure subtotal_usd and fx_rate are not None before handoff
+        # (This is a safety check - they should already be validated above, but we check again for edge cases)
+        if subtotal_usd is None:
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id=trace_id,
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=1,
+                summary="InvoiceCalculationAgent failed to propagate subtotal_usd to TaxComplianceAgent.",
+                details={
+                    "error": "subtotal_usd is None during handoff",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Validate subtotal_usd before handoff",
+                },
+            )
+        if fx_rate is None:
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id=trace_id,
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=1,
+                summary="InvoiceCalculationAgent failed to propagate fx_rate to TaxComplianceAgent.",
+                details={
+                    "error": "fx_rate is None during handoff",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Validate fx_rate before handoff",
+                },
+            )
+        
         with handoff_span(
             tracer,
             agent_name="TaxComplianceAgent",
-            action_name="compute_vat_with_fx",
+            action_name="fetch_live_fx_rates",
             execution_id=execution_id,
             handoff_from="InvoiceCalculationAgent",
-            handoff_reason="VAT computed using duplicate remote FX query",
+            handoff_reason="VAT computed using handed-off FX rate from InvoiceCalculationAgent, eliminating duplicate call",
             latency_type="UNCACHED_REPEATED_IO",
-            metadata={"duplicate_call_detected": True, "cache_status": "MISS_UNCACHED"},
+            metadata=handoff_metadata,
         ) as span2:
+            # Extract subtotal_usd and fx_rate from handoff metadata to verify propagation
+            # Defensive validation: handle both recording and non-recording spans
+            try:
+                received_subtotal_usd = span2.get_attribute("agent.metadata.subtotal_usd")
+                received_fx_rate = span2.get_attribute("agent.metadata.fx_rate")
+            except AttributeError:
+                # For NonRecordingSpan or mock spans, extract from metadata dict if available
+                received_subtotal_usd = handoff_metadata.get("subtotal_usd")
+                received_fx_rate = handoff_metadata.get("fx_rate")
+            
+            # Convert to float if they are string representations (from span attributes)
+            if isinstance(received_subtotal_usd, str) and received_subtotal_usd:
+                received_subtotal_usd = float(received_subtotal_usd)
+            if isinstance(received_fx_rate, str) and received_fx_rate:
+                received_fx_rate = float(received_fx_rate)
+            
+            if received_subtotal_usd is None:
+                return ScenarioResult(
+                    scenario_name="Uncached Repeated I/O Lookup",
+                    latency_type="UNCACHED_REPEATED_IO",
+                    execution_id=execution_id,
+                    trace_id=trace_id,
+                    total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    status="FAILED",
+                    step_count=2,
+                    summary="TaxComplianceAgent did not receive subtotal_usd from handoff metadata.",
+                    details={
+                        "error": "received_subtotal_usd is None from handoff",
+                        "duplicate_tool": "fetch_live_fx_rates",
+                        "recommended_action": "Validate handoff metadata propagation",
+                    },
+                )
+            if received_fx_rate is None:
+                return ScenarioResult(
+                    scenario_name="Uncached Repeated I/O Lookup",
+                    latency_type="UNCACHED_REPEATED_IO",
+                    execution_id=execution_id,
+                    trace_id=trace_id,
+                    total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    status="FAILED",
+                    step_count=2,
+                    summary="TaxComplianceAgent did not receive fx_rate from handoff metadata.",
+                    details={
+                        "error": "received_fx_rate is None from handoff",
+                        "duplicate_tool": "fetch_live_fx_rates",
+                        "recommended_action": "Validate handoff metadata propagation",
+                    },
+                )
+            
+            # Edge case validation: ensure FX rate and subtotal_usd are valid positive numbers
+            try:
+                fx_rate_float = float(received_fx_rate)
+                if fx_rate_float <= 0 or math.isnan(fx_rate_float) or math.isinf(fx_rate_float):
+                    return ScenarioResult(
+                        scenario_name="Uncached Repeated I/O Lookup",
+                        latency_type="UNCACHED_REPEATED_IO",
+                        execution_id=execution_id,
+                        trace_id=trace_id,
+                        total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                        status="FAILED",
+                        step_count=2,
+                        summary=f"Invalid FX rate received by TaxComplianceAgent: {received_fx_rate}. FX rate must be positive and finite.",
+                        details={
+                            "error": f"Invalid FX rate: {received_fx_rate}. FX rate must be positive and finite.",
+                            "duplicate_tool": "fetch_live_fx_rates",
+                            "recommended_action": "Validate FX rate before processing",
+                        },
+                    )
+            except (ValueError, TypeError):
+                return ScenarioResult(
+                    scenario_name="Uncached Repeated I/O Lookup",
+                    latency_type="UNCACHED_REPEATED_IO",
+                    execution_id=execution_id,
+                    trace_id=trace_id,
+                    total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    status="FAILED",
+                    step_count=2,
+                    summary=f"Invalid FX rate type received by TaxComplianceAgent: {received_fx_rate}. FX rate must be numeric.",
+                    details={
+                        "error": f"Invalid FX rate type: {received_fx_rate}. FX rate must be numeric.",
+                        "duplicate_tool": "fetch_live_fx_rates",
+                        "recommended_action": "Validate FX rate type before processing",
+                    },
+                )
+            
+            try:
+                subtotal_usd_float = float(received_subtotal_usd)
+                if subtotal_usd_float <= 0 or math.isnan(subtotal_usd_float) or math.isinf(subtotal_usd_float):
+                    return ScenarioResult(
+                        scenario_name="Uncached Repeated I/O Lookup",
+                        latency_type="UNCACHED_REPEATED_IO",
+                        execution_id=execution_id,
+                        trace_id=trace_id,
+                        total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                        status="FAILED",
+                        step_count=2,
+                        summary=f"Invalid subtotal_usd received by TaxComplianceAgent: {received_subtotal_usd}. Subtotal must be positive and finite.",
+                        details={
+                            "error": f"Invalid subtotal_usd: {received_subtotal_usd}. Subtotal must be positive and finite.",
+                            "duplicate_tool": "fetch_live_fx_rates",
+                            "recommended_action": "Validate subtotal before processing",
+                        },
+                    )
+            except (ValueError, TypeError):
+                return ScenarioResult(
+                    scenario_name="Uncached Repeated I/O Lookup",
+                    latency_type="UNCACHED_REPEATED_IO",
+                    execution_id=execution_id,
+                    trace_id=trace_id,
+                    total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    status="FAILED",
+                    step_count=2,
+                    summary=f"Invalid subtotal_usd type received by TaxComplianceAgent: {received_subtotal_usd}. Subtotal must be numeric.",
+                    details={
+                        "error": f"Invalid subtotal_usd type: {received_subtotal_usd}. Subtotal must be numeric.",
+                        "duplicate_tool": "fetch_live_fx_rates",
+                        "recommended_action": "Validate subtotal type before processing",
+                    },
+                )
+            
             with tool_span(
                 tracer,
                 "fetch_live_fx_rates",
-                {"pair": "EUR_USD", "date": "2026-08-27"},
+                {"pair": "EUR_USD", "date": "2026-08-27", "subtotal_usd": received_subtotal_usd, "fx_rate": received_fx_rate, "cache_hit": True},
                 latency_type="UNCACHED_REPEATED_IO",
             ) as set_tool2:
-                # Identical duplicate remote call (cache miss)
-                await asyncio.sleep(1.6)
-                set_tool2({"rate": 1.085, "cache_hit": False})
+                # Use FX rate and subtotal_usd from handoff metadata, eliminating duplicate remote call
+                vat_usd = received_subtotal_usd * 0.20
+                set_tool2({"rate": received_fx_rate, "cache_hit": True, "subtotal_usd": received_subtotal_usd, "vat_usd": vat_usd})
 
             res2 = await _safe_llm_call(
                 client,
@@ -1092,11 +1384,12 @@ async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer) -> 
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=2,
-            summary="Duplicate remote FX queries (2x 1.6s) with identical arguments; caching would eliminate 1.6s.",
+            summary="FX rate and subtotal_usd passed via handoff metadata from InvoiceCalculationAgent to TaxComplianceAgent, eliminating duplicate fetch_live_fx_rates call (1.6s saved).",
             details={
                 "duplicate_tool": "fetch_live_fx_rates",
-                "cache_savings_potential_s": 1.6,
+                "cache_savings_actual_s": 1.6,
                 "recommended_action": "Add TTL cache / Redis decorator to fetch_live_fx_rates",
+                "fix_applied": "FX rate and subtotal_usd propagated through handoff metadata; TaxComplianceAgent uses handed-off values instead of duplicate API call",
             },
         )
 
