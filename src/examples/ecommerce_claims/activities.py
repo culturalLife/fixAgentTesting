@@ -50,6 +50,8 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         raise ValueError("customer_id is required and must not be empty")
     if not getattr(claim, "customer_message", None) or not str(claim.customer_message).strip():
         raise ValueError("customer_message is required and must not be empty")
+    if getattr(claim, "claim_amount", None) is None or float(claim.claim_amount) <= 0:
+        raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
