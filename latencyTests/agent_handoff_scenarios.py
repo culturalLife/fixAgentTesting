@@ -36,7 +36,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Tracer
 from mistralai.client import Mistral
 
-from latency_telemetry import handoff_span, tool_span, record_span_error
+from .latency_telemetry import handoff_span, tool_span, record_span_error
 
 logger = logging.getLogger(__name__)
 
@@ -200,17 +200,26 @@ async def run_ping_pong_loop_scenario(
         is_claim_finalized = False
         triage_iteration_count = 0
         max_triage_iterations = 2
-        result_summary = None
+        result_summary = ""
         
         for i in range(1, iterations + 1):
             # Check if we can terminate early based on state
             if is_validation_complete and is_claim_finalized:
+                result_summary = result_summary or "Both validation and claim finalization completed successfully"
                 break
             
             # TriageAgent loop detection: terminate if max iterations reached without progress
-            if triage_iteration_count >= max_triage_iterations and not is_claim_finalized:
+            if triage_iteration_count >= max_triage_iterations:
                 result_summary = "TriageAgent: Max iterations reached without resolution, escalating to FinalResolutionAgent"
                 is_claim_finalized = True
+                break
+            
+            # Additional check: if validation is complete but claim not finalized, or vice versa
+            # and we've exceeded max iterations, escalate
+            if (is_validation_complete or is_claim_finalized) and triage_iteration_count >= max_triage_iterations:
+                result_summary = result_summary or "Partial resolution detected, escalating to FinalResolutionAgent"
+                is_claim_finalized = True
+                is_validation_complete = True
                 break
                 
             # Triage Agent Turn
@@ -222,7 +231,7 @@ async def run_ping_pong_loop_scenario(
                 handoff_to="PolicyValidationAgent",
                 handoff_reason=f"Turn {i}: Requesting clarification on ambiguous exclusion clause",
                 latency_type="LOOP_THRASH_HANDOFF",
-                metadata={"iteration": i, "max_iterations": iterations, "is_validation_complete": is_validation_complete, "is_claim_finalized": is_claim_finalized, "triage_iteration_count": triage_iteration_count, "result_summary": result_summary},
+                metadata={"iteration": i, "max_iterations": iterations, "is_validation_complete": is_validation_complete, "is_claim_finalized": is_claim_finalized, "triage_iteration_count": triage_iteration_count, "result_summary": result_summary or "In Progress"},
             ) as s_triage:
                 s_triage.set_attribute("gen_ai.agent.handoff.iteration", i)
                 await asyncio.sleep(0.4)
@@ -232,7 +241,7 @@ async def run_ping_pong_loop_scenario(
                     system_prompt="You are a Triage Claims Agent."
                 )
                 s_triage.set_attribute("agent.response", res1[:80])
-                s_triage.set_attribute("result_summary", result_summary or "N/A")
+                s_triage.set_attribute("result_summary", result_summary or "In Progress")
                 step_count += 1
                 triage_iteration_count += 1
                 
@@ -240,6 +249,11 @@ async def run_ping_pong_loop_scenario(
                 if i >= iterations or "resolved" in res1.lower():
                     is_claim_finalized = True
                     result_summary = f"TriageAgent: Claim finalized at iteration {i}"
+                
+                # State validation: if max iterations reached, force finalization
+                if triage_iteration_count >= max_triage_iterations and not is_claim_finalized:
+                    is_claim_finalized = True
+                    result_summary = result_summary or f"TriageAgent: Max iterations ({max_triage_iterations}) reached, forcing finalization"
 
             # Validation Agent Turn (Bounces back to Triage)
             with handoff_span(
@@ -248,10 +262,10 @@ async def run_ping_pong_loop_scenario(
                 action_name=f"verify_clauses_turn_{i}",
                 execution_id=execution_id,
                 handoff_from="TriageAgent",
-                handoff_to="FinalResolutionAgent" if is_claim_finalized else "TriageAgent" if i < iterations else "FinalResolutionAgent",
-                handoff_reason=f"Turn {i}: Insufficient clause specificity, returning for refinement" if i < iterations and not is_claim_finalized else "Resolved",
+                handoff_to="FinalResolutionAgent" if (is_claim_finalized or is_validation_complete) else "TriageAgent" if i < iterations else "FinalResolutionAgent",
+                handoff_reason=f"Turn {i}: Insufficient clause specificity, returning for refinement" if i < iterations and not (is_claim_finalized or is_validation_complete) else "Resolved",
                 latency_type="LOOP_THRASH_HANDOFF",
-                metadata={"iteration": i, "rejection_code": "AMBIGUOUS_EVIDENCE", "is_validation_complete": is_validation_complete, "is_claim_finalized": is_claim_finalized, "result_summary": result_summary},
+                metadata={"iteration": i, "rejection_code": "AMBIGUOUS_EVIDENCE", "is_validation_complete": is_validation_complete, "is_claim_finalized": is_claim_finalized, "result_summary": result_summary or "In Progress"},
             ) as s_val:
                 s_val.set_attribute("gen_ai.agent.handoff.iteration", i)
                 await asyncio.sleep(0.45)
@@ -261,13 +275,17 @@ async def run_ping_pong_loop_scenario(
                     system_prompt="You are a Policy Validation Agent."
                 )
                 s_val.set_attribute("agent.response", res2[:80])
-                s_val.set_attribute("result_summary", result_summary or "N/A")
+                s_val.set_attribute("result_summary", result_summary or "In Progress")
                 step_count += 1
                 
                 # PolicyValidationAgent marks validation as complete when resolved
                 if i >= iterations or "resolved" in res2.lower():
                     is_validation_complete = True
                     result_summary = result_summary or f"PolicyValidationAgent: Validation complete at iteration {i}"
+                
+                # State validation: if both states are complete, ensure result_summary is set
+                if is_validation_complete and is_claim_finalized:
+                    result_summary = result_summary or "Both validation and claim finalization completed successfully"
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         root_span.set_attribute("gen_ai.latency.duration_ms", duration_ms)
@@ -280,8 +298,8 @@ async def run_ping_pong_loop_scenario(
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=step_count,
-            summary=f"Cyclical handoff thrashing between TriageAgent and PolicyValidationAgent across {iterations} iterations.",
-            details={"iterations": iterations, "total_handoff_cycles": step_count},
+            summary=result_summary or f"Cyclical handoff thrashing between TriageAgent and PolicyValidationAgent across {step_count} handoff cycles.",
+            details={"iterations": iterations, "total_handoff_cycles": step_count, "result_summary": result_summary},
         )
 
 
