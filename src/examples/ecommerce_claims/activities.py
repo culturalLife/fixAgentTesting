@@ -34,7 +34,7 @@ def _get_mistral_client() -> Mistral:
 
 
 # ---------------------------------------------------------------------------
-# ACTIVITY 1: Intake & Classification Agent
+# ACTIVITY 1: Intake & Classification Agent (FAQIntakeAgent)
 # ---------------------------------------------------------------------------
 @workflows.activity(
     name="intake_and_classify_claim",
@@ -59,7 +59,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
         span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-        span.set_attribute("gen_ai.agent.name", "IntakeClassificationAgent")
+        span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
         span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
         span.set_attribute("input.claim_id", claim.claim_id)
         span.set_attribute("input.customer_id", claim.customer_id)
@@ -81,10 +81,49 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 f"- summary: concise 1-2 sentence description"
             )
 
+            # FAQIntakeAgent tool configuration with strict bullet JSON schema and max_tokens=150
             res = client.chat.complete(
                 model="mistral-small-latest",
                 messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                max_tokens=150,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "extract_structured_claim_data",
+                            "description": "Extract and validate structured claim data using strict bullet JSON schema",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "claim_category": {
+                                        "type": "string",
+                                        "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
+                                        "description": "Category of the claim"
+                                    },
+                                    "urgency": {
+                                        "type": "string",
+                                        "enum": ["low", "normal", "high", "critical"],
+                                        "description": "Urgency level of the claim"
+                                    },
+                                    "policy_applicable": {
+                                        "type": "string",
+                                        "description": "Name of the applicable policy clause"
+                                    },
+                                    "requires_warehouse_lookup": {
+                                        "type": "boolean",
+                                        "description": "Whether warehouse lookup is required"
+                                    },
+                                    "summary": {
+                                        "type": "string",
+                                        "description": "Concise 1-2 sentence description of the claim"
+                                    }
+                                },
+                                "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
+                            }
+                        }
+                    }
+                ]
             )
             raw_content = res.choices[0].message.content
             parsed = json.loads(raw_content)
@@ -110,23 +149,6 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
-
-    # Added schema validation instructions for structured output
-
-    prompt = (
-        f"You are the final customer resolution specialist.\n"
-        f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
-        f"Customer Message: {claim.customer_message}\n"
-        f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
-        f"Reasoning: {compliance.reasoning_summary}\n\n"
-        "CRITICAL FORMAT RULES:\n"
-        "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
-        "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
-        "3. 'approved_amount' must be a float.\n"
-        "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
-        "5. Limit the response to a maximum of 150 tokens.\n"
-        "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +220,7 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
 
         except Exception as exc:
             record_span_exception(span, exc)
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
 
 
@@ -249,13 +271,7 @@ async def evaluate_compliance_and_policy(
             parsed = json.loads(res.choices[0].message.content)
             if not isinstance(parsed, dict):
                 raise ValueError("Invalid JSON structure: expected a dictionary")
-            if not isinstance(parsed, dict):
-                raise ValueError("Invalid JSON structure: expected a dictionary")
-            if not isinstance(parsed, dict):
-                raise ValueError("Invalid JSON structure: expected a dictionary")
-            if not isinstance(parsed, dict):
-                raise ValueError("Invalid JSON structure: expected a dictionary")
-            
+
             raw_summary = parsed.get("reasoning_summary", "Claim evaluated under store policy.")
             if isinstance(raw_summary, (dict, list)):
                 raw_summary = " ".join(str(item) for item in (raw_summary if isinstance(raw_summary, list) else [raw_summary]))
@@ -282,23 +298,6 @@ async def evaluate_compliance_and_policy(
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
-
-    # Added schema validation instructions for structured output
-
-    prompt = (
-        f"You are the final customer resolution specialist.\n"
-        f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
-        f"Customer Message: {claim.customer_message}\n"
-        f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
-        f"Reasoning: {compliance.reasoning_summary}\n\n"
-        "CRITICAL FORMAT RULES:\n"
-        "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
-        "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
-        "3. 'approved_amount' must be a float.\n"
-        "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
-        "5. Limit the response to a maximum of 150 tokens.\n"
-        "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -332,11 +331,9 @@ async def generate_customer_resolution(
                     applicable_clauses=["Missing Prior Compliance Evaluation"],
                     reasoning_summary="Compliance step was missing or unverified in workflow context."
                 )
-            compliance = compliance
+
             span.set_attribute("selected_courier", "COURIER-881")
             span.set_attribute("express.priority", "TIER_1")
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "final_results": result.model_dump_json()}))
-            # Added schema validation instructions for structured output
 
             prompt = (
                 f"You are the final customer resolution specialist.\n"
@@ -370,14 +367,14 @@ async def generate_customer_resolution(
                     raw_content.replace("\n", " ")
                     .replace("\r", " ")
                     .replace("\t", " ")
-                    .replace("\"", "'")
+                    .replace('"', "'")
                     .strip()
                     .replace("{", "{")
                     .replace("}", "}")
                 )
                 # Ensure the string is properly terminated
                 if not sanitized_content.endswith("}"):
-                    sanitized_content = sanitized_content.rstrip().rstrip("\"") + "}"
+                    sanitized_content = sanitized_content.rstrip().rstrip('"') + "}"
                 parsed = json.loads(sanitized_content)
 
             # Validate the parsed JSON structure
@@ -402,20 +399,3 @@ async def generate_customer_resolution(
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
-
-    # Added schema validation instructions for structured output
-
-    prompt = (
-        f"You are the final customer resolution specialist.\n"
-        f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
-        f"Customer Message: {claim.customer_message}\n"
-        f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
-        f"Reasoning: {compliance.reasoning_summary}\n\n"
-        "CRITICAL FORMAT RULES:\n"
-        "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
-        "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
-        "3. 'approved_amount' must be a float.\n"
-        "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
-        "5. Limit the response to a maximum of 150 tokens.\n"
-        "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
-    )
