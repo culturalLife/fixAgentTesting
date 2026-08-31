@@ -4,7 +4,7 @@ import os
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 import mistralai.workflows as workflows
-from mistralai.client.chat import Chat
+from mistralai.client import Mistral
 
 from src.telemetry import (
     get_current_execution_id,
@@ -53,7 +53,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
     # --- End validation guard ---
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
-    client = Chat(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
+    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
     with tracer.start_as_current_span("intake_and_classify_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
@@ -103,13 +103,30 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
             span.set_attribute("gen_ai.activity.result", result.model_dump_json())
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "arguments": locals(), "final_results": result.model_dump_json()}))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "final_results": result.model_dump_json()}))
             return result
 
         except Exception as exc:
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
+
+    # Added schema validation instructions for structured output
+
+    prompt = (
+        f"You are the final customer resolution specialist.\n"
+        f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
+        f"Customer Message: {claim.customer_message}\n"
+        f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
+        f"Reasoning: {compliance.reasoning_summary}\n\n"
+        "CRITICAL FORMAT RULES:\n"
+        "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
+        "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
+        "3. 'approved_amount' must be a float.\n"
+        "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
+        "5. Limit the response to a maximum of 150 tokens.\n"
+        "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +139,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
 async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classification: IntakeClassification) -> List[ToolExecutionResult]:
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
-    client = Chat(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
+    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
     with tracer.start_as_current_span("verify_tools_dispatch_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
@@ -199,7 +216,7 @@ async def evaluate_compliance_and_policy(
 ) -> ComplianceReasoningResult:
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
-    client = Chat(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
+    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
     with tracer.start_as_current_span("compliance_reasoning_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
@@ -258,13 +275,30 @@ async def evaluate_compliance_and_policy(
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
             span.set_attribute("gen_ai.activity.result", result.model_dump_json())
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "arguments": locals(), "final_results": result.model_dump_json()}))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "final_results": result.model_dump_json()}))
             return result
 
         except Exception as exc:
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
+
+    # Added schema validation instructions for structured output
+
+    prompt = (
+        f"You are the final customer resolution specialist.\n"
+        f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
+        f"Customer Message: {claim.customer_message}\n"
+        f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
+        f"Reasoning: {compliance.reasoning_summary}\n\n"
+        "CRITICAL FORMAT RULES:\n"
+        "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
+        "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
+        "3. 'approved_amount' must be a float.\n"
+        "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
+        "5. Limit the response to a maximum of 150 tokens.\n"
+        "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +315,7 @@ async def generate_customer_resolution(
 ) -> ResolutionReport:
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
-    client = Chat(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
+    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
     with tracer.start_as_current_span("customer_resolution_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
@@ -301,7 +335,7 @@ async def generate_customer_resolution(
             compliance = compliance
             span.set_attribute("selected_courier", "COURIER-881")
             span.set_attribute("express.priority", "TIER_1")
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "arguments": locals(), "final_results": result.model_dump_json(), "selected_courier": "COURIER-881", "express_priority": "TIER_1"}))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "final_results": result.model_dump_json()}))
             # Added schema validation instructions for structured output
 
             prompt = (
@@ -315,6 +349,8 @@ async def generate_customer_resolution(
                 "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
                 "3. 'approved_amount' must be a float.\n"
                 "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
+                "5. Limit the response to a maximum of 150 tokens.\n"
+                "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
             )
 
             res = client.chat.complete(
@@ -359,10 +395,27 @@ async def generate_customer_resolution(
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
             span.set_attribute("gen_ai.activity.result", result.model_dump_json())
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "arguments": locals(), "final_results": result.model_dump_json()}))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "final_results": result.model_dump_json()}))
             return result
 
         except Exception as exc:
             record_span_exception(span, exc)
             span.set_attribute("gen_ai.activity.status", "FAILED")
             raise exc
+
+    # Added schema validation instructions for structured output
+
+    prompt = (
+        f"You are the final customer resolution specialist.\n"
+        f"Draft a formal resolution for claim {claim.claim_id} (Customer: {claim.customer_id}).\n"
+        f"Customer Message: {claim.customer_message}\n"
+        f"Eligibility: {compliance.is_eligible}, Risk Score: {compliance.risk_score}\n"
+        f"Reasoning: {compliance.reasoning_summary}\n\n"
+        "CRITICAL FORMAT RULES:\n"
+        "1. Return ONLY valid JSON with keys: 'claim_id', 'status', 'action_taken', 'approved_amount', 'customer_facing_response', 'internal_notes'.\n"
+        "2. 'status' must be 'APPROVED', 'REJECTED', or 'ESCALATED'.\n"
+        "3. 'approved_amount' must be a float.\n"
+        "4. Ensure the output strictly follows the schema: {\"claim_id\": string, \"status\": string, \"action_taken\": string, \"approved_amount\": float, \"customer_facing_response\": string, \"internal_notes\": string}\n"
+        "5. Limit the response to a maximum of 150 tokens.\n"
+        "6. Ensure the output is strictly in JSON format without any additional text or explanations.\n"
+    )
