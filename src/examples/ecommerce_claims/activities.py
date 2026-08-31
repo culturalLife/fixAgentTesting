@@ -301,7 +301,7 @@ async def generate_customer_resolution(
             compliance = compliance
             span.set_attribute("selected_courier", "COURIER-881")
             span.set_attribute("express.priority", "TIER_1")
-            span.set_attribute("gen_ai.activity.state", json.dumps({"selected_courier": "COURIER-881", "express_priority": "TIER_1"}))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result.model_dump_json(), "arguments": locals(), "final_results": result.model_dump_json(), "selected_courier": "COURIER-881", "express_priority": "TIER_1"}))
             # Added schema validation instructions for structured output
 
             prompt = (
