@@ -997,6 +997,9 @@ async def run_model_oversizing_scenario(client: Mistral, tracer: Tracer) -> Scen
                 system_prompt="You are a Tier Classifier. Output exactly two words.",
             )
             span1.set_attribute("agent.classification", res[:50])
+            span1.set_attribute("result_summary", f"VIP classification: {res[:50]}")
+            span1.set_attribute("arguments", json.dumps({"prompt": "Answer ONLY with 'VIP: YES' or 'VIP: NO'. Is a customer with $10,000 spend VIP?", "system_prompt": "You are a Tier Classifier. Output exactly two words."}))
+            span1.set_attribute("final_result", json.dumps({"classification": res[:50]}))
 
         # Step 2: Downstream Routing
         with handoff_span(
