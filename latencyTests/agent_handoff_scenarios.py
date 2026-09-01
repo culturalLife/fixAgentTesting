@@ -1283,6 +1283,130 @@ async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer, moc
         from opentelemetry import trace
         tracer = trace.get_tracer(__name__)
 
+    # Early edge case validation: validate mock_tool_result structure and content
+    if mock_tool_result is not None:
+        if not isinstance(mock_tool_result, dict):
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id="0",
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=0,
+                summary="Invalid mock_tool_result type: must be a dictionary.",
+                details={
+                    "error": f"mock_tool_result is {type(mock_tool_result).__name__}, expected dict",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Pass a valid dictionary for mock_tool_result",
+                },
+            )
+        # Check for required keys
+        if "rate" not in mock_tool_result or "subtotal_usd" not in mock_tool_result:
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id="0",
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=0,
+                summary="mock_tool_result missing required fields: 'rate' and/or 'subtotal_usd'.",
+                details={
+                    "error": f"Missing required keys in mock_tool_result: {set(['rate', 'subtotal_usd']) - set(mock_tool_result.keys())}",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Ensure mock_tool_result contains 'rate' and 'subtotal_usd' keys",
+                },
+            )
+        # Validate that rate and subtotal_usd are not None in mock_tool_result
+        rate_val = mock_tool_result.get("rate")
+        subtotal_val = mock_tool_result.get("subtotal_usd")
+        if rate_val is None or subtotal_val is None:
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id="0",
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=0,
+                summary="mock_tool_result contains None values for required fields.",
+                details={
+                    "error": f"rate={rate_val}, subtotal_usd={subtotal_val}. Both must be non-None.",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Ensure mock_tool_result has non-None values for 'rate' and 'subtotal_usd'",
+                },
+            )
+        # Validate numeric types and ranges for edge cases
+        try:
+            rate_float = float(rate_val)
+            if rate_float <= 0 or math.isnan(rate_float) or math.isinf(rate_float):
+                return ScenarioResult(
+                    scenario_name="Uncached Repeated I/O Lookup",
+                    latency_type="UNCACHED_REPEATED_IO",
+                    execution_id=execution_id,
+                    trace_id="0",
+                    total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    status="FAILED",
+                    step_count=0,
+                    summary=f"Invalid FX rate in mock_tool_result: {rate_val}. Must be positive and finite.",
+                    details={
+                        "error": f"Invalid FX rate: {rate_val}. FX rate must be positive and finite.",
+                        "duplicate_tool": "fetch_live_fx_rates",
+                        "recommended_action": "Validate FX rate before processing",
+                    },
+                )
+        except (ValueError, TypeError):
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id="0",
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=0,
+                summary=f"Invalid FX rate type in mock_tool_result: {rate_val}. Must be numeric.",
+                details={
+                    "error": f"Invalid FX rate type: {rate_val}. FX rate must be numeric.",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Validate FX rate type before processing",
+                },
+            )
+        try:
+            subtotal_float = float(subtotal_val)
+            if subtotal_float <= 0 or math.isnan(subtotal_float) or math.isinf(subtotal_float):
+                return ScenarioResult(
+                    scenario_name="Uncached Repeated I/O Lookup",
+                    latency_type="UNCACHED_REPEATED_IO",
+                    execution_id=execution_id,
+                    trace_id="0",
+                    total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                    status="FAILED",
+                    step_count=0,
+                    summary=f"Invalid subtotal_usd in mock_tool_result: {subtotal_val}. Must be positive and finite.",
+                    details={
+                        "error": f"Invalid subtotal_usd: {subtotal_val}. Subtotal must be positive and finite.",
+                        "duplicate_tool": "fetch_live_fx_rates",
+                        "recommended_action": "Validate subtotal before processing",
+                    },
+                )
+        except (ValueError, TypeError):
+            return ScenarioResult(
+                scenario_name="Uncached Repeated I/O Lookup",
+                latency_type="UNCACHED_REPEATED_IO",
+                execution_id=execution_id,
+                trace_id="0",
+                total_duration_ms=(time.perf_counter() - start_time) * 1000,
+                status="FAILED",
+                step_count=0,
+                summary=f"Invalid subtotal_usd type in mock_tool_result: {subtotal_val}. Must be numeric.",
+                details={
+                    "error": f"Invalid subtotal_usd type: {subtotal_val}. Subtotal must be numeric.",
+                    "duplicate_tool": "fetch_live_fx_rates",
+                    "recommended_action": "Validate subtotal type before processing",
+                },
+            )
+
     with tracer.start_as_current_span("trace_uncached_repeated_io") as root_span:
         root_span.set_attribute("gen_ai.workflow.name", "international-invoice-processing")
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
@@ -1430,6 +1554,15 @@ async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer, moc
                             "recommended_action": "Validate subtotal type before processing",
                         },
                     )
+
+            with tool_span(
+                tracer,
+                "convert_currency_lines",
+                {"amount_eur": 500, "fx_rate": fx_rate, "subtotal_usd": subtotal_usd},
+                latency_type="UNCACHED_REPEATED_IO",
+            ) as set_convert:
+                converted_lines = [{"amount_eur": 500, "amount_usd": subtotal_usd, "fx_rate": fx_rate}]
+                set_convert({"converted_invoice_lines": converted_lines})
 
             res1 = await _safe_llm_call(
                 client,
@@ -1609,13 +1742,13 @@ async def run_uncached_repeated_io_scenario(client: Mistral, tracer: Tracer, moc
             
             with tool_span(
                 tracer,
-                "fetch_live_fx_rates",
-                {"pair": "EUR_USD", "date": "2026-08-27", "subtotal_usd": received_subtotal_usd, "fx_rate": received_fx_rate, "cache_hit": True},
+                "compute_vat_with_fx",
+                {"subtotal_usd": received_subtotal_usd, "fx_rate": received_fx_rate},
                 latency_type="UNCACHED_REPEATED_IO",
             ) as set_tool2:
                 # Use FX rate and subtotal_usd from handoff metadata, eliminating duplicate remote call
                 vat_usd = received_subtotal_usd * 0.20
-                set_tool2({"rate": received_fx_rate, "cache_hit": True, "subtotal_usd": received_subtotal_usd, "vat_usd": vat_usd})
+                set_tool2({"vat_usd": vat_usd, "subtotal_usd": received_subtotal_usd, "fx_rate": received_fx_rate})
 
             res2 = await _safe_llm_call(
                 client,
