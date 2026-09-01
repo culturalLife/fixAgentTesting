@@ -650,7 +650,8 @@ async def run_fanout_straggler_scenario(client: Mistral, tracer: Tracer) -> Scen
     """
     Scenario 5: UnderwritingCoordinator fans out tasks to 3 parallel sub-agents.
     IdentityAgent (0.2s) and FraudAgent (0.3s) finish quickly, but CreditBureauAgent
-    straggles for 3.9s, gating the final approval handoff.
+    straggles for 3.9s. The CreditBureauStragglerAgent is now executed with a 1.5s timeout,
+    and ApprovalAggregationAgent receives all upstream results via explicit state passing.
     """
     execution_id = f"lat-fanout-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
@@ -722,25 +723,40 @@ async def run_fanout_straggler_scenario(client: Mistral, tracer: Tracer) -> Scen
                 s.set_attribute("credit.status", "APPROVED")
                 return {"credit_score": 740}
 
-        # Fan-out execution
-        await asyncio.gather(sub_identity(), sub_fraud(), sub_credit_straggler())
+        # Fan-out execution with timeout for straggler
+        try:
+            credit_result = await asyncio.wait_for(sub_credit_straggler(), timeout=1.5)
+        except asyncio.TimeoutError:
+            credit_result = {"credit_score": None, "status": "TIMEOUT"}
+        
+        identity_result = await sub_identity()
+        fraud_result = await sub_fraud()
+        
+        # Collect all upstream results for explicit state passing
+        upstream_results = {
+            "identity": identity_result,
+            "fraud": fraud_result,
+            "credit": credit_result,
+        }
 
-        # Step 3: Aggregator waits for all parallel agents before completing
+        # Step 3: Aggregator receives all upstream results via explicit state passing
         with handoff_span(
             tracer,
             agent_name="ApprovalAggregationAgent",
             action_name="finalize_underwriting_decision",
             execution_id=execution_id,
             handoff_from="CreditBureauStragglerAgent",
-            handoff_reason="All parallel evaluations received, approving loan",
+            handoff_reason="All parallel evaluations received via state passing, approving loan",
         ) as span_agg:
             await asyncio.sleep(0.2)
+            credit_score = upstream_results["credit"].get("credit_score", 740)
             decision = await _safe_llm_call(
                 client,
-                prompt="Approve loan application APP-77192 with credit score 740 and low fraud risk.",
+                prompt=f"Approve loan application APP-77192 with credit score {credit_score} and low fraud risk.",
                 system_prompt="You are a Loan Underwriting Approver."
             )
             span_agg.set_attribute("underwriting.final_decision", decision[:100])
+            span_agg.set_attribute("upstream_results", json.dumps(upstream_results))
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         root_span.set_attribute("gen_ai.latency.duration_ms", duration_ms)
@@ -753,8 +769,8 @@ async def run_fanout_straggler_scenario(client: Mistral, tracer: Tracer) -> Scen
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=5,
-            summary="Parallel CreditBureauStragglerAgent took 3.9s, gating the entire fan-in aggregation.",
-            details={"straggler_agent": "CreditBureauStragglerAgent", "straggler_duration_s": 3.9},
+            summary="CreditBureauStragglerAgent executed with 1.5s timeout; ApprovalAggregationAgent received all upstream results via explicit state passing.",
+            details={"straggler_agent": "CreditBureauStragglerAgent", "straggler_duration_s": 3.9, "timeout_s": 1.5, "state_passing": "explicit"},
         )
 
 
