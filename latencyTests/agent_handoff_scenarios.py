@@ -890,37 +890,47 @@ async def run_clean_baseline_scenario(client: Mistral, tracer: Tracer) -> Scenar
         root_span.set_attribute("gen_ai.latency.type", "CLEAN_OPTIMAL_BASELINE")
         trace_id = format(root_span.get_span_context().trace_id, "032x")
 
-        # Step 1: Intake
-        with handoff_span(
-            tracer,
-            agent_name="ExpressIntakeAgent",
-            action_name="classify_priority_request",
-            execution_id=execution_id,
-            handoff_to="ExpressDispatchAgent",
-            handoff_reason="Classified as urgent express shipment, routing to dispatch",
-        ) as span1:
-            await asyncio.sleep(0.1)
-            span1.set_attribute("express.priority", "TIER_1")
+        # Step 1: Intake - classify priority request
+        async def run_intake_step():
+            with handoff_span(
+                tracer,
+                agent_name="ExpressIntakeAgent",
+                action_name="classify_priority_request",
+                execution_id=execution_id,
+                handoff_to="ExpressDispatchAgent",
+                handoff_reason="Classified as urgent express shipment, routing to dispatch",
+            ) as span1:
+                await asyncio.sleep(0.1)
+                span1.set_attribute("express.priority", "TIER_1")
+                return "TIER_1"
 
-        # Step 2: Dispatch
-        with handoff_span(
-            tracer,
-            agent_name="ExpressDispatchAgent",
-            action_name="assign_delivery_courier",
-            execution_id=execution_id,
-            handoff_from="ExpressIntakeAgent",
-            handoff_reason="Courier assigned instantly",
-        ) as span2:
-            with tool_span(tracer, "check_courier_availability", {"zone": "US-WEST-1"}) as set_tool:
-                await asyncio.sleep(0.08)
-                set_tool({"available_couriers": 14, "selected_courier": "COURIER-881"})
+        # Step 2: Dispatch - assign delivery courier (can run in parallel with intake)
+        async def run_dispatch_step():
+            with handoff_span(
+                tracer,
+                agent_name="ExpressDispatchAgent",
+                action_name="assign_delivery_courier",
+                execution_id=execution_id,
+                handoff_from="ExpressIntakeAgent",
+                handoff_reason="Courier assigned instantly",
+            ) as span2:
+                with tool_span(tracer, "check_courier_availability", {"zone": "US-WEST-1"}) as set_tool:
+                    await asyncio.sleep(0.08)
+                    set_tool({"available_couriers": 14, "selected_courier": "COURIER-881"})
 
-            reply = await _safe_llm_call(
-                client,
-                prompt="Confirm priority courier dispatch.",
-                system_prompt="You are an Express Dispatch Agent."
-            )
-            span2.set_attribute("agent.reply", reply[:80])
+                reply = await _safe_llm_call(
+                    client,
+                    prompt="Confirm priority courier dispatch.",
+                    system_prompt="You are an Express Dispatch Agent."
+                )
+                span2.set_attribute("agent.reply", reply[:80])
+                return reply
+
+        # Execute both steps in parallel since dispatch doesn't depend on intake output
+        priority_result, dispatch_reply = await asyncio.gather(
+            run_intake_step(),
+            run_dispatch_step()
+        )
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         root_span.set_attribute("gen_ai.latency.duration_ms", duration_ms)
