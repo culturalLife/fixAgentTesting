@@ -369,6 +369,23 @@ async def run_blocking_tool_stall_scenario(client: Mistral, tracer: Tracer) -> S
                     "tracking": "9400100000000000000000",
                 })
 
+            with tool_span(
+                tracer,
+                tool_name="fetch_order_records",
+                arguments={
+                    "order_id": "ORD-99381",
+                    "status": "IN_TRANSIT",
+                    "carrier": "FedEx",
+                    "tracking": "9400100000000000000000",
+                },
+            ) as set_tool2:
+                set_tool2({
+                    "order_id": "ORD-99381",
+                    "status": "IN_TRANSIT",
+                    "carrier": "FedEx",
+                    "tracking": "9400100000000000000000",
+                })
+
             resp = await _safe_llm_call(
                 client,
                 prompt="Format ERP response for order ORD-99381.",
@@ -386,11 +403,22 @@ async def run_blocking_tool_stall_scenario(client: Mistral, tracer: Tracer) -> S
             handoff_reason="Customer reply composed",
         ) as span3:
             await asyncio.sleep(0.25)
-            final_reply = await _safe_llm_call(
-                client,
-                prompt="Draft polite customer update for order in transit.",
-                system_prompt="You are a Customer Resolution Agent."
-            )
+            with tool_span(
+                tracer,
+                tool_name="compose_customer_reply",
+                arguments={
+                    "order_id": "ORD-99381",
+                    "status": "IN_TRANSIT",
+                    "carrier": "FedEx",
+                    "tracking": "9400100000000000000000",
+                },
+            ) as set_tool3:
+                final_reply = await _safe_llm_call(
+                    client,
+                    prompt="Draft polite customer update for order ORD-99381: IN_TRANSIT with FedEx tracking 9400100000000000000000.",
+                    system_prompt="You are a Customer Resolution Agent."
+                )
+                set_tool3(final_reply)
             span3.set_attribute("agent.final_reply", final_reply[:100])
 
         duration_ms = (time.perf_counter() - start_time) * 1000
