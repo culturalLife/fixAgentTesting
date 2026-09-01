@@ -1145,7 +1145,7 @@ async def run_sequential_io_waterfall_scenario(client: Mistral, tracer: Tracer) 
         with handoff_span(
             tracer,
             agent_name="ProfileEnrichmentAgent",
-            action_name="fetch_customer_attributes_parallel",
+            action_name="fetch_customer_attributes_sequential",
             execution_id=execution_id,
             handoff_to="RiskScoringAgent",
             handoff_reason="Collected 4 customer attributes in parallel over network",
@@ -1220,13 +1220,13 @@ async def run_sequential_io_waterfall_scenario(client: Mistral, tracer: Tracer) 
             execution_id=execution_id,
             handoff_from="ProfileEnrichmentAgent",
             handoff_reason="Profile enriched with parallel data fetch, scored risk as LOW",
-            metadata={"user_id": "USR-881", "kyc_status": "VERIFIED", "credit_score": 720, "fraud_status": "CLEAN"},
+            metadata=aggregated_data,
         ) as span2:
             # Use the preserved state from ProfileEnrichmentAgent
             with tool_span(
                 tracer, 
                 "compute_risk_score", 
-                {"user_id": "USR-881", "kyc_status": "VERIFIED", "credit_score": 720, "fraud_status": "CLEAN"},
+                aggregated_data,
                 latency_type="SEQUENTIAL_IO_WATERFALL"
             ) as set_tool:
                 await asyncio.sleep(0.2)
