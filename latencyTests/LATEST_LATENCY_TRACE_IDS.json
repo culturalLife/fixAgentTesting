@@ -1,0 +1,175 @@
+[
+  {
+    "scenario_name": "Cascading Handoff Delay",
+    "latency_type": "CASCADING_HANDOFF_DELAY",
+    "execution_id": "lat-cascade-7498fe85",
+    "trace_id": "fe545269c15f80f6935812ace52060d6",
+    "total_duration_ms": 12482.75,
+    "status": "SUCCESS",
+    "step_count": 3,
+    "summary": "Upstream DocumentIngestionAgent caused 3.2s stall, delaying downstream agents.",
+    "details": {
+      "bottleneck_agent": "DocumentIngestionAgent",
+      "bottleneck_duration_s": 3.2
+    }
+  },
+  {
+    "scenario_name": "Ping-Pong Loop Thrash Handoff",
+    "latency_type": "LOOP_THRASH_HANDOFF",
+    "execution_id": "lat-loop-4f57e780",
+    "trace_id": "13e8be2a9f1a36c507ec2195db7561f4",
+    "total_duration_ms": 17649.76,
+    "status": "SUCCESS",
+    "step_count": 8,
+    "summary": "Cyclical handoff thrashing between TriageAgent and PolicyValidationAgent across 4 iterations.",
+    "details": {
+      "iterations": 4,
+      "total_handoff_cycles": 8
+    }
+  },
+  {
+    "scenario_name": "Blocking Tool / External I/O Stall",
+    "latency_type": "BLOCKING_TOOL_STALL",
+    "execution_id": "lat-tool-stall-94a36874",
+    "trace_id": "aeddcfaacb71413a64e8a5476bb7a887",
+    "total_duration_ms": 8137.2,
+    "status": "SUCCESS",
+    "step_count": 3,
+    "summary": "LegacyDatabaseAgent blocked for 3.6s on slow tool query_legacy_sap_erp.",
+    "details": {
+      "slow_tool": "query_legacy_sap_erp",
+      "tool_delay_s": 3.6
+    }
+  },
+  {
+    "scenario_name": "Token Bloat & High TTFT Latency",
+    "latency_type": "TOKEN_BLOAT_LATENCY",
+    "execution_id": "lat-bloat-9eedcbd9",
+    "trace_id": "92d1a62c50bbf6c57a7c9dcf5fc5bfbb",
+    "total_duration_ms": 5186.27,
+    "status": "SUCCESS",
+    "step_count": 2,
+    "summary": "35,400 token context payload caused elevated TTFT (2400ms) and LLM generation drag (2.8s).",
+    "details": {
+      "prompt_tokens": 35400,
+      "ttft_ms": 2400,
+      "llm_processing_s": 2.8
+    }
+  },
+  {
+    "scenario_name": "Fan-out Straggler Bottleneck",
+    "latency_type": "FANOUT_STRAGGLER_DELAY",
+    "execution_id": "lat-fanout-7d67bf7b",
+    "trace_id": "b4af446185db8fe58e5b3afb52682a74",
+    "total_duration_ms": 6274.43,
+    "status": "SUCCESS",
+    "step_count": 5,
+    "summary": "Parallel CreditBureauStragglerAgent took 3.9s, gating the entire fan-in aggregation.",
+    "details": {
+      "straggler_agent": "CreditBureauStragglerAgent",
+      "straggler_duration_s": 3.9
+    }
+  },
+  {
+    "scenario_name": "Retry Storm & Degraded Fallback",
+    "latency_type": "RETRY_STORM_BACKOFF",
+    "execution_id": "lat-retry-f1b13347",
+    "trace_id": "8dde55a7a3cbf768d3171cfdbbfa39fc",
+    "total_duration_ms": 6592.02,
+    "status": "DEGRADED",
+    "step_count": 5,
+    "summary": "3 sequential timeout retries with exponential backoffs caused 5.4s delay before degraded fallback.",
+    "details": {
+      "attempts": 3,
+      "cumulative_backoff_s": 2.4000000000000004
+    }
+  },
+  {
+    "scenario_name": "Clean Optimal Baseline",
+    "latency_type": "CLEAN_OPTIMAL_BASELINE",
+    "execution_id": "lat-clean-f718dcf2",
+    "trace_id": "0bb9d5cd3dc69bee321425539e54554c",
+    "total_duration_ms": 845.99,
+    "status": "SUCCESS",
+    "step_count": 2,
+    "summary": "Optimal reference handoff completed in under 400ms without latency defects.",
+    "details": {
+      "duration_ms": 845.9927000003518
+    }
+  },
+  {
+    "scenario_name": "Model Oversizing LLM Delay",
+    "latency_type": "MODEL_OVERSIZING_LLM_DELAY",
+    "execution_id": "lat-oversize-00e347f2",
+    "trace_id": "a5ce951d951c695ecf7c72070b43b6ca",
+    "total_duration_ms": 4797.42,
+    "status": "SUCCESS",
+    "step_count": 2,
+    "summary": "mistral-large used for trivial 2-word boolean classification (3.8s LLM delay).",
+    "details": {
+      "current_model": "mistral-large-latest",
+      "recommended_model": "mistral-small-latest or ministral-8b",
+      "latency_reduction_potential_pct": 75
+    }
+  },
+  {
+    "scenario_name": "Unconstrained Generation Drag",
+    "latency_type": "UNCONSTRAINED_GEN_DRAG",
+    "execution_id": "lat-unconstrained-df868d46",
+    "trace_id": "3ec16b2c459ba5dfefc9615d8324316c",
+    "total_duration_ms": 6773.03,
+    "status": "SUCCESS",
+    "step_count": 3,
+    "summary": "Unconstrained 1,420 token generation caused 4.5s generation drag.",
+    "details": {
+      "completion_tokens": 1420,
+      "recommended_action": "Set max_tokens=150 and enforce structured Pydantic schema"
+    }
+  },
+  {
+    "scenario_name": "Sequential I/O Waterfall",
+    "latency_type": "SEQUENTIAL_IO_WATERFALL",
+    "execution_id": "lat-waterfall-4bd660fd",
+    "trace_id": "4677a1dfe9f71c0229ab4f32f93e57cd",
+    "total_duration_ms": 4921.3,
+    "status": "SUCCESS",
+    "step_count": 2,
+    "summary": "4 sequential network calls caused 3.4s I/O delay; parallelization would reduce to ~0.9s.",
+    "details": {
+      "sequential_calls": 4,
+      "cumulative_io_s": 3.4,
+      "parallel_potential_s": 0.9,
+      "recommended_action": "Use asyncio.gather() or batch HTTP endpoint"
+    }
+  },
+  {
+    "scenario_name": "Uncached Repeated I/O Lookup",
+    "latency_type": "UNCACHED_REPEATED_IO",
+    "execution_id": "lat-uncached-d8d3456b",
+    "trace_id": "9775c461157ffa632b4448dd1aa7c399",
+    "total_duration_ms": 5693.0,
+    "status": "SUCCESS",
+    "step_count": 2,
+    "summary": "Duplicate remote FX queries (2x 1.6s) with identical arguments; caching would eliminate 1.6s.",
+    "details": {
+      "duplicate_tool": "fetch_live_fx_rates",
+      "cache_savings_potential_s": 1.6,
+      "recommended_action": "Add TTL cache / Redis decorator to fetch_live_fx_rates"
+    }
+  },
+  {
+    "scenario_name": "Heavy Vision Payload I/O",
+    "latency_type": "HEAVY_VISION_PAYLOAD_IO",
+    "execution_id": "lat-vision-io-f24e9448",
+    "trace_id": "acf42ad637ae1606ca62d356cef29170",
+    "total_duration_ms": 6653.82,
+    "status": "SUCCESS",
+    "step_count": 3,
+    "summary": "25.4MB uncompressed TIFF image transfer caused 4.2s vision I/O latency; downscaling saves ~3.8s.",
+    "details": {
+      "raw_size_mb": 25.4,
+      "transfer_delay_s": 4.2,
+      "recommended_action": "Downscale to 1024px WebP to reduce payload by 98%"
+    }
+  }
+]

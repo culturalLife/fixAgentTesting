@@ -1,0 +1,145 @@
+[
+  {
+    "scenario_name": "Vendor Invoice Reconciliation",
+    "anomaly_type": "RUNAWAY_RETRIES",
+    "execution_id": "exec-inv-rec-0aaad165",
+    "trace_id": "ea4e74c89af1ce0c16c9e819855fc478",
+    "status": "SUCCESS",
+    "duration_ms": 11677.76,
+    "step_count": 5,
+    "timestamp": "2026-09-08T09:29:15.218690+00:00",
+    "summary": "Invoice parsing encountered JSON markdown formatting errors, requiring 3 retry attempts before succeeding.",
+    "details": {
+      "max_attempts": 3,
+      "final_status": "SUCCESS",
+      "retried_agent": "InvoiceIngestionAgent"
+    }
+  },
+  {
+    "scenario_name": "Dual Compliance Screening",
+    "anomaly_type": "REDUNDANT_CALLS",
+    "execution_id": "exec-wire-comp-cd69729a",
+    "trace_id": "e9c2fd4d962871ec5062245e656c1ca3",
+    "status": "SUCCESS",
+    "duration_ms": 4845.38,
+    "step_count": 3,
+    "timestamp": "2026-09-08T09:29:15.218705+00:00",
+    "summary": "OFAC, AML, and Audit agents issued identical compliance policy queries without shared memoization.",
+    "details": {
+      "duplicate_calls_count": 3,
+      "identical_prompt_hash": true
+    }
+  },
+  {
+    "scenario_name": "Mortgage Underwriting & Settlement Pipeline",
+    "anomaly_type": "FAILED_EXECUTIONS",
+    "execution_id": "exec-mort-orig-124d62f9",
+    "trace_id": "c57e50c7b7b88073abe3259cccad98a8",
+    "status": "FAILED",
+    "duration_ms": 6396.53,
+    "step_count": 4,
+    "timestamp": "2026-09-08T09:29:15.218711+00:00",
+    "summary": "Workflow completed credit, income, and appraisal underwriting but failed at final wire settlement due to missing schema field.",
+    "details": {
+      "error": "KeyError: 'wire_routing_number'",
+      "wasted_upstream_agents": [
+        "CreditRiskAssessmentAgent",
+        "IncomeVerificationAgent",
+        "PropertyValuationAgent"
+      ]
+    }
+  },
+  {
+    "scenario_name": "Commercial Lease Due Diligence",
+    "anomaly_type": "EXPENSIVE_PROMPT",
+    "execution_id": "exec-lease-audit-f7328cb3",
+    "trace_id": "0551b1dacfd3ea96b2b2af8cd390327a",
+    "status": "SUCCESS",
+    "duration_ms": 5964.16,
+    "step_count": 3,
+    "timestamp": "2026-09-08T09:29:15.218716+00:00",
+    "summary": "ClauseExtractionAgent stuffed 9,000+ unpruned lease boilerplate tokens across queries without caching.",
+    "details": {
+      "estimated_p50_tokens": 8800,
+      "dominant_role": "user",
+      "cache_miss": true
+    }
+  },
+  {
+    "scenario_name": "Customer Support Ticket Triage",
+    "anomaly_type": "OVER_PROVISIONED_MODEL",
+    "execution_id": "exec-triage-ovr-cd628282",
+    "trace_id": "9e8df4330e55192733876f59b743b528",
+    "status": "SUCCESS",
+    "duration_ms": 681.12,
+    "step_count": 1,
+    "timestamp": "2026-09-08T09:29:15.218720+00:00",
+    "summary": "mistral-large-latest was utilized for single-token enum classification on a single-turn query.",
+    "details": {
+      "model": "mistral-large-latest",
+      "output_tokens_approx": 1,
+      "downgrade_target": "mistral-small-latest"
+    }
+  },
+  {
+    "scenario_name": "VIP Travel Concierge Multi-Turn Dialogue",
+    "anomaly_type": "CONTEXT_GROWTH_LEAK",
+    "execution_id": "exec-concierge-34fd9c31",
+    "trace_id": "803c004df33d5b59c3acf3bf06fd5e6f",
+    "status": "SUCCESS",
+    "duration_ms": 8969.47,
+    "step_count": 4,
+    "timestamp": "2026-09-08T09:29:15.218723+00:00",
+    "summary": "Conversation history accumulated across 4 agent handoffs without compaction or sliding window.",
+    "details": {
+      "turn_count": 4,
+      "growth_pattern": "monotonic_accumulation"
+    }
+  },
+  {
+    "scenario_name": "Retail Supply Chain Inventory Audit",
+    "anomaly_type": "TOOL_CALL_AMPLIFICATION",
+    "execution_id": "exec-wh-audit-348b84be",
+    "trace_id": "17f70502a5cbf0a2cc1608d23c9f977b",
+    "status": "SUCCESS",
+    "duration_ms": 2318.46,
+    "step_count": 2,
+    "timestamp": "2026-09-08T09:29:15.218727+00:00",
+    "summary": "Raw uncompressed 18 KB JSON database dump injected into prompt, dominating >70% of prompt tokens.",
+    "details": {
+      "tool_name": "query_warehouse_database",
+      "payload_share_pct": 74.5
+    }
+  },
+  {
+    "scenario_name": "Quantitative Portfolio Strategy Reporting",
+    "anomaly_type": "CACHE_COLLAPSE",
+    "execution_id": "exec-portf-rep-173031cb",
+    "trace_id": "3bb39d8b9face98647e3d8e9fb259004",
+    "status": "SUCCESS",
+    "duration_ms": 7145.84,
+    "step_count": 3,
+    "timestamp": "2026-09-08T09:29:15.218730+00:00",
+    "summary": "Calls 1 and 2 established a warm prefix cache; Call 3 prepended dynamic audit timestamps at byte 0, invalidating cache.",
+    "details": {
+      "prefix_cache_invalidated": true,
+      "static_prefix_tokens": 3100
+    }
+  },
+  {
+    "scenario_name": "High-Efficiency Warranty Claims Baseline",
+    "anomaly_type": "CLEAN_OPTIMAL_BASELINE",
+    "execution_id": "exec-opt-claim-7089e841",
+    "trace_id": "b5f56ae71a7a00a624a6b0b2c42abc27",
+    "status": "SUCCESS",
+    "duration_ms": 2985.8,
+    "step_count": 3,
+    "timestamp": "2026-09-08T09:29:15.218734+00:00",
+    "summary": "Clean baseline workflow using right-sized model, projected tool outputs, and zero token waste.",
+    "details": {
+      "wasted_tokens": 0,
+      "efficiency_score": 100.0,
+      "status": "OPTIMAL"
+    }
+  }
+]
