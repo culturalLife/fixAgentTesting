@@ -36,6 +36,9 @@ def _get_mistral_client() -> Mistral:
 # ---------------------------------------------------------------------------
 # ACTIVITY 1: Intake & Classification Agent (FAQIntakeAgent)
 # ---------------------------------------------------------------------------
+# Cache for storing classification results by claim_id to avoid redundant API calls
+_intake_classification_cache: Dict[str, IntakeClassification] = {}
+
 @workflows.activity(
     name="intake_and_classify_claim",
     start_to_close_timeout=timedelta(seconds=45),
@@ -53,6 +56,26 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
     if getattr(claim, "claim_amount", None) is None or float(claim.claim_amount) <= 0:
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
+    
+    # Check cache first to avoid redundant API calls for the same claim
+    claim_id_str = str(claim.claim_id)
+    if claim_id_str in _intake_classification_cache:
+        cached_result = _intake_classification_cache[claim_id_str]
+        tracer = get_telemetry_tracer_instance(SERVICE_NAME)
+        execution_id = get_current_execution_id()
+        with tracer.start_as_current_span("intake_and_classify_span") as span:
+            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
+            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
+            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
+            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
+            span.set_attribute("input.claim_id", claim.claim_id)
+            span.set_attribute("input.customer_id", claim.customer_id)
+            span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
+        return cached_result
+    
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
@@ -165,6 +188,9 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
                 summary=str(summary_str),
             )
+
+            # Cache the result to avoid redundant API calls for the same claim
+            _intake_classification_cache[claim_id_str] = result
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
             # Safely serialize result to JSON, handling MagicMock objects
