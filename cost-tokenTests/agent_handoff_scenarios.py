@@ -9,12 +9,12 @@ and asset management.
 Each scenario implements natural production architecture patterns with organic real-world
 system defects (e.g. unformatted markdown responses, schema field omissions, unmemoized
 redundant lookups, uncompressed tool payloads, and cache-busting timestamp headers)
-that naturally trigger observability cost and token behavior detectors:
+calibrated to trigger observability cost and token behavior detectors:
   1. RUNAWAY_RETRIES         - Unsanitized model output causing JSONDecodeError retry loop
   2. REDUNDANT_CALLS          - Dual compliance agents issuing identical unmemoized queries
   3. FAILED_EXECUTIONS        - Downstream missing payload key aborting multi-stage mortgage pipeline
   4. EXPENSIVE_PROMPT         - Unpruned multi-document lease stuffing (>8,500 tokens / turn)
-  5. OVER_PROVISIONED_MODEL   - Frontier model used for single-token ticket routing
+  5. OVER_PROVISIONED_MODEL   - Frontier model used for single-token ticket routing (>2,000 tokens input)
   6. CONTEXT_GROWTH_LEAK      - Naive conversation history accumulation across concierge handoffs
   7. TOOL_CALL_AMPLIFICATION  - Unprojected warehouse database dump dominating downstream prompt
   8. CACHE_COLLAPSE           - Dynamic audit timestamp prepended to static regulatory prompt
@@ -65,8 +65,9 @@ async def _safe_llm_call(
     messages: Optional[List[Dict[str, str]]] = None,
     temperature: float = 0.2,
     max_tokens: int = 300,
+    parent_span: Optional[Any] = None,
 ) -> str:
-    """Executes a live Mistral chat completion, falling back to simulation if offline."""
+    """Executes a live Mistral chat completion, syncing token usage to parent_span."""
     chat_messages = []
     if messages:
         chat_messages = messages
@@ -76,6 +77,9 @@ async def _safe_llm_call(
         if prompt:
             chat_messages.append({"role": "user", "content": prompt})
 
+    in_tokens = 0
+    out_tokens = 0
+
     try:
         response = await client.chat.complete_async(
             model=model,
@@ -83,7 +87,18 @@ async def _safe_llm_call(
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return response.choices[0].message.content or ""
+        content = response.choices[0].message.content or ""
+        if hasattr(response, "usage") and response.usage:
+            in_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+            out_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+        else:
+            in_tokens = sum(len(m.get("content", "")) for m in chat_messages) // 4
+            out_tokens = len(content) // 4
+
+        if parent_span and hasattr(parent_span, "set_token_usage"):
+            parent_span.set_token_usage(input_tokens=in_tokens, output_tokens=out_tokens)
+
+        return content
     except Exception as exc:
         logger.debug(f"LLM call fallback due to: {exc}")
         await asyncio.sleep(0.35)
@@ -91,7 +106,12 @@ async def _safe_llm_call(
             (m["content"] for m in reversed(chat_messages) if m.get("role") == "user"),
             "System Request"
         )
-        return f"[Simulated LLM response for: {last_user_content[:50]}...]"
+        content = f"[Simulated LLM response for: {last_user_content[:50]}...]"
+        in_tokens = sum(len(m.get("content", "")) for m in chat_messages) // 4
+        out_tokens = max(20, len(content) // 4)
+        if parent_span and hasattr(parent_span, "set_token_usage"):
+            parent_span.set_token_usage(input_tokens=in_tokens, output_tokens=out_tokens)
+        return content
 
 
 # ===========================================================================
@@ -101,10 +121,10 @@ async def _safe_llm_call(
 async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tracer) -> ScenarioResult:
     """
     Accounts payable processing of an international equipment shipment invoice.
-    The InvoiceIngestionAgent requests structured JSON extraction from an OCR
-    document. Because the model wraps output in markdown code fences without schema
-    validation mode, json.loads fails on attempts 1 and 2, triggering an automated
-    activity retry loop before succeeding on attempt 3 via regex sanitization.
+    The InvoiceIngestionAgent requests structured JSON extraction from an OCR document.
+    Because the model wraps output in markdown code fences without schema validation,
+    json.loads fails on attempts 1 and 2, triggering an automated activity retry loop
+    before succeeding on attempt 3.
     """
     execution_id = f"exec-inv-rec-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
@@ -114,11 +134,6 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
         root_span.set_attribute("gen_ai.workflow.name", workflow_name)
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         trace_id = format(root_span.get_span_context().trace_id, "032x")
-
-        # Step 1: Invoice Extraction with Automated Retry Attempts
-        parsed_items = None
-        max_attempts = 3
-        last_error = None
 
         raw_invoice_ocr = (
             "INVOICE #: INV-2026-9812 | VENDOR: Nordika Industrial Hydraulics GmbH\n"
@@ -130,50 +145,57 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
             "SUBTOTAL: EUR 5415.00 | VAT (19%): EUR 1028.85 | TOTAL: EUR 6443.85"
         )
 
+        prompts_by_attempt = {
+            1: f"Extract all invoice line items from this OCR document into a JSON array of objects with keys item_code, quantity, unit_price:\n\n{raw_invoice_ocr}",
+            2: f"Correction: The previous attempt failed JSON parsing. Re-extract invoice line items strictly as JSON without extra prose:\n\n{raw_invoice_ocr}",
+            3: f"Final verification attempt: Parse the invoice items as raw JSON records:\n\n{raw_invoice_ocr}",
+        }
+
+        max_attempts = 3
+        parsed_items = None
+
         for attempt in range(1, max_attempts + 1):
+            action_name = f"extract_invoice_line_items_{attempt}"
             with handoff_span(
                 tracer,
                 agent_name="InvoiceIngestionAgent",
-                action_name="extract_invoice_line_items",
+                action_name=action_name,
                 execution_id=execution_id,
                 workflow_name=workflow_name,
                 handoff_to="VendorValidationAgent" if attempt == max_attempts else None,
                 handoff_reason="Invoice lines extracted, ready for vendor ERP verification" if attempt == max_attempts else None,
                 attempt=attempt,
-                metadata={"vendor": "Nordika Industrial Hydraulics GmbH", "invoice_no": "INV-2026-9812", "attempt": attempt},
+                metadata={
+                    "vendor": "Nordika Industrial Hydraulics GmbH",
+                    "attempt": attempt,
+                    "gen_ai.latency.type": "RETRY_STORM_BACKOFF",
+                },
             ) as span_ingest:
-                extraction_prompt = (
-                    f"Extract all invoice line items from this OCR document into a JSON array of objects "
-                    f"with keys: item_code, description, quantity, unit_price, total_price.\n\n"
-                    f"OCR Text:\n{raw_invoice_ocr}"
-                )
+                span_ingest.set_attribute("gen_ai.latency.type", "RETRY_STORM_BACKOFF")
+                span_ingest.set_attribute("wf.activity.attempt", attempt)
+                span_ingest.set_attribute("agent.metadata.attempt", str(attempt))
+
+                extraction_prompt = prompts_by_attempt[attempt]
                 response_text = await _safe_llm_call(
                     client,
                     model="mistral-small-latest",
                     prompt=extraction_prompt,
                     system_prompt="You are an Accounts Payable Ingestion Agent. Return valid JSON line items.",
+                    parent_span=span_ingest,
                 )
 
-                # Real-world behavior: On initial attempts, raw response has markdown formatting
                 if attempt < 3:
-                    formatted_text = f"```json\n[\n  {{\"item_code\": \"SEAL-4402\", \"description\": \"High-pressure seal rings\", \"quantity\": 50, \"unit_price\": 38.50, \"total_price\": 1925.00}},\n  {{\"item_code\": \"FLG-991\", \"description\": \"Flange coupling\", \"quantity\": 20, \"unit_price\": 142.00, \"total_price\": 2840.00}}\n]\n```"
-                else:
-                    formatted_text = "[{\"item_code\": \"SEAL-4402\", \"quantity\": 50, \"unit_price\": 38.50}, {\"item_code\": \"FLG-991\", \"quantity\": 20, \"unit_price\": 142.00}]"
-
-                try:
-                    if attempt < 3:
-                        # Attempt direct JSON deserialization without fence stripping
+                    formatted_text = f"```json\n[\n  {{\"item_code\": \"SEAL-4402\", \"quantity\": 50, \"unit_price\": 38.50}}\n]\n```"
+                    try:
                         parsed_items = json.loads(formatted_text)
-                    else:
-                        # Attempt 3: Sanitized regex extraction
-                        match = re.search(r"\[.*\]", formatted_text, re.DOTALL)
-                        parsed_items = json.loads(match.group(0)) if match else []
-                        span_ingest.set_attribute("agent.extraction.item_count", len(parsed_items))
-                        break
-                except Exception as exc:
-                    last_error = exc
-                    record_span_error(span_ingest, exc)
-                    await asyncio.sleep(0.4)
+                    except Exception as exc:
+                        record_span_error(span_ingest, exc)
+                        await asyncio.sleep(0.3)
+                else:
+                    clean_json = "[{\"item_code\": \"SEAL-4402\", \"quantity\": 50, \"unit_price\": 38.50}]"
+                    parsed_items = json.loads(clean_json)
+                    span_ingest.set_attribute("agent.extraction.item_count", len(parsed_items))
+                    break
 
         # Step 2: Vendor ERP Validation
         with handoff_span(
@@ -187,7 +209,7 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
             handoff_reason="Vendor tax credentials valid, advancing to ledger entry generation",
         ) as span_vendor:
             with tool_span(tracer, "erp_vendor_lookup", {"tax_id": "DE-289419201"}, execution_id) as set_tool:
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.2)
                 set_tool({"standing": "APPROVED", "payment_terms": "NET_30", "currency": "EUR"})
 
             vendor_summary = await _safe_llm_call(
@@ -195,6 +217,7 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
                 model="mistral-small-latest",
                 prompt="Verify vendor tax standing and currency alignment for Nordika Industrial Hydraulics GmbH.",
                 system_prompt="You are a Vendor Compliance Verification Agent.",
+                parent_span=span_vendor,
             )
             span_vendor.set_attribute("agent.validation_summary", vendor_summary[:80])
 
@@ -214,6 +237,7 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
                 model="mistral-small-latest",
                 prompt="Format double-entry ledger debit (1510-Inventory) and credit (2010-Accounts Payable) for EUR 6,443.85.",
                 system_prompt="You are a Corporate General Ledger Agent.",
+                parent_span=span_ledger,
             )
             span_ledger.set_attribute("agent.posting_voucher", posting_summary[:80])
 
@@ -253,7 +277,6 @@ async def run_dual_compliance_screening_scenario(client: Mistral, tracer: Tracer
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         trace_id = format(root_span.get_span_context().trace_id, "032x")
 
-        # Canonical compliance evaluation query used across departments
         shared_statutory_prompt = (
             "Perform statutory compliance audit for cross-border wire remittance:\n"
             "Transaction ID: TX-SG-2026-90412 | Amount: 750,000.00 USD\n"
@@ -281,6 +304,7 @@ async def run_dual_compliance_screening_scenario(client: Mistral, tracer: Tracer
                 system_prompt=shared_system_prompt,
                 temperature=0.0,
                 max_tokens=200,
+                parent_span=span_ofac,
             )
             span_ofac.set_attribute("agent.ofac_verdict", ofac_verdict[:80])
 
@@ -302,6 +326,7 @@ async def run_dual_compliance_screening_scenario(client: Mistral, tracer: Tracer
                 system_prompt=shared_system_prompt,
                 temperature=0.0,
                 max_tokens=200,
+                parent_span=span_aml,
             )
             span_aml.set_attribute("agent.aml_verdict", aml_verdict[:80])
 
@@ -322,6 +347,7 @@ async def run_dual_compliance_screening_scenario(client: Mistral, tracer: Tracer
                 system_prompt=shared_system_prompt,
                 temperature=0.0,
                 max_tokens=200,
+                parent_span=span_audit,
             )
             span_audit.set_attribute("agent.audit_confirmation", audit_confirm[:80])
 
@@ -389,6 +415,7 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
                 model="mistral-small-latest",
                 prompt=f"Assess FICO score {applicant_profile['fico_score']} for $420,000 conventional conforming mortgage.",
                 system_prompt="You are a Senior Underwriting Credit Analyst.",
+                parent_span=span_credit,
             )
             span_credit.set_attribute("agent.credit_risk_tier", "PRIME")
 
@@ -408,6 +435,7 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
                 model="mistral-small-latest",
                 prompt=f"Calculate front-end and back-end DTI for annual income ${applicant_profile['annual_w2_income']} with monthly debt ${applicant_profile['monthly_debt_obligations']}.",
                 system_prompt="You are a Mortgage Income and Employment Verification Specialist.",
+                parent_span=span_income,
             )
             span_income.set_attribute("agent.dti_ratio", "28.4%")
 
@@ -427,6 +455,7 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
                 model="mistral-small-latest",
                 prompt=f"Verify LTV for $420,000 loan against $525,000 appraised single-family residence at {applicant_profile['property_address']}.",
                 system_prompt="You are a Collateral Valuation and Appraisal Review Officer.",
+                parent_span=span_property,
             )
             span_property.set_attribute("agent.ltv_ratio", "80.0%")
 
@@ -442,6 +471,7 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
                 workflow_name=workflow_name,
                 handoff_from="PropertyValuationAgent",
             ) as span_wire:
+                span_wire.set_token_usage(input_tokens=220, output_tokens=30)
                 # Production bug: intake schema provided 'routing_number' while wire gateway expects 'wire_routing_number'
                 wire_instructions = {
                     "beneficiary": applicant_profile["applicant_name"],
@@ -480,80 +510,67 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
 async def run_commercial_lease_due_diligence_scenario(client: Mistral, tracer: Tracer) -> ScenarioResult:
     """
     Acquisition due diligence auditing five commercial master lease agreements.
-    Instead of using targeted section retrieval, the prompt builder dumps the
-    entire 9,000+ token uncompressed legal lease text into each clause review turn.
-    With p50 > 8,500 tokens and zero prefix caching, it triggers the Expensive Prompt detector.
+    The ClauseExtractionAgent audits 5 distinct lease covenants against an unpruned
+    8,500+ token legal lease boilerplate without prefix caching, satisfying the >=5 cohort
+    requirement and triggering context stuffing detection (p50 > 8,000 tokens).
     """
     execution_id = f"exec-lease-audit-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
     workflow_name = "wf_commercial_lease_analysis"
 
-    # Corpus representing heavy commercial master lease boilerplate
     heavy_lease_boilerplate = (
         "SECTION 1. PREMISES AND TERM. Landlord hereby leases to Tenant, and Tenant hereby leases from Landlord, "
         "the commercial premises situated at 100 Montgomery Street, Floors 14 through 18, San Francisco, CA. "
         "The initial term shall commence on January 1, 2024 and expire on December 31, 2034, unless sooner terminated...\n"
-        + ("SECTION 2. OPERATING EXPENSES AND COMMON AREA MAINTENANCE. Tenant shall pay its Proportionate Share (14.82%) of Common Area Maintenance (CAM), including HVAC maintenance, security monitoring, elevator service contracts, exterior structural reserves, and municipal sewer assessments...\n" * 15)
-        + ("SECTION 8. SUBLETTING AND ASSIGNMENT COVENANTS. Tenant shall not transfer, pledge, or sublease the premises without prior written consent of Landlord. Any assignment resulting in a change of corporate control exceeding 49% of voting equity shall constitute an unpermitted assignment trigger...\n" * 15)
-        + ("SECTION 14. INDEMNIFICATION, HAZARDOUS MATERIALS, AND ENVIRONMENTAL COVENANTS. Tenant shall defend, indemnify, and hold harmless Landlord and its managing agents against any claims, damages, liabilities, fines, or remediation costs arising from hazardous substance release or statutory environmental breaches...\n" * 15)
-        + ("SECTION 22. DEFAULT, LIQUIDATED DAMAGES, AND ACCELERATION REMEDIES. Upon occurrence of an Event of Default, Landlord may accelerate all remaining monthly base rent installments through the expiration date, discounted to present value at the Federal Reserve discount rate plus 200 basis points...\n" * 15)
+        + ("SECTION 2. OPERATING EXPENSES AND COMMON AREA MAINTENANCE. Tenant shall pay its Proportionate Share (14.82%) of Common Area Maintenance (CAM), including HVAC maintenance, security monitoring, elevator service contracts, exterior structural reserves, and municipal sewer assessments...\n" * 16)
+        + ("SECTION 8. SUBLETTING AND ASSIGNMENT COVENANTS. Tenant shall not transfer, pledge, or sublease the premises without prior written consent of Landlord. Any assignment resulting in a change of corporate control exceeding 49% of voting equity shall constitute an unpermitted assignment trigger...\n" * 16)
+        + ("SECTION 14. INDEMNIFICATION, HAZARDOUS MATERIALS, AND ENVIRONMENTAL COVENANTS. Tenant shall defend, indemnify, and hold harmless Landlord and its managing agents against any claims, damages, liabilities, fines, or remediation costs arising from hazardous substance release or statutory environmental breaches...\n" * 16)
+        + ("SECTION 22. DEFAULT, LIQUIDATED DAMAGES, AND ACCELERATION REMEDIES. Upon occurrence of an Event of Default, Landlord may accelerate all remaining monthly base rent installments through the expiration date, discounted to present value at the Federal Reserve discount rate plus 200 basis points...\n" * 16)
+        + ("SECTION 30. CASUALTY, CONDEMNATION, AND EMINENT DOMAIN PROVISIONS. If fifty percent (50%) or more of the rentable square footage is rendered untenantable by casualty or condemnation, either party may terminate this Lease upon thirty (30) days written notice without penalty...\n" * 16)
     )
+
+    covenants_to_audit = [
+        ("Sublease Rights", "Evaluate whether Tenant may sublet 20,000 square feet to an affiliate without Landlord approval."),
+        ("Environmental Indemnity", "Assess Tenant's ongoing environmental liability obligations under Section 14."),
+        ("Operating CAM Expenses", "Audit whether municipal sewer assessments and capital improvement reserves are excluded from CAM pass-through."),
+        ("Default Acceleration", "Determine whether Landlord can accelerate rent without providing a 10-day notice and cure period under Section 22."),
+        ("Casualty Termination", "Review whether a partial fire damaging 40% of Floor 15 permits Tenant lease termination under Section 30."),
+    ]
 
     with tracer.start_as_current_span("workflow_commercial_lease_analysis") as root_span:
         root_span.set_attribute("gen_ai.workflow.name", workflow_name)
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         trace_id = format(root_span.get_span_context().trace_id, "032x")
 
-        # Step 1: Sublease Clause Evaluation (Context stuffed prompt)
-        with handoff_span(
-            tracer,
-            agent_name="ClauseExtractionAgent",
-            action_name="evaluate_sublease_rights",
-            execution_id=execution_id,
-            workflow_name=workflow_name,
-            handoff_to="RiskSynthesizerAgent",
-            handoff_reason="Sublease covenants analyzed, passing to environmental review",
-        ) as span_clause:
-            query_prompt = (
-                f"Analyze the following full commercial lease portfolio documentation:\n\n"
-                f"{heavy_lease_boilerplate}\n\n"
-                f"Evaluate whether Tenant may sublet 20,000 square feet to an affiliate without Landlord approval."
-            )
-            sublease_resp = await _safe_llm_call(
-                client,
-                model="mistral-small-latest",
-                prompt=query_prompt,
-                system_prompt="You are a Commercial Real Estate Legal Due Diligence Specialist.",
-                max_tokens=250,
-            )
-            span_clause.set_attribute("agent.sublease_evaluation", sublease_resp[:80])
+        # 5 queries under the exact same activity cohort to satisfy len(spans) >= 5
+        for idx, (cov_title, cov_query) in enumerate(covenants_to_audit, 1):
+            with handoff_span(
+                tracer,
+                agent_name="ClauseExtractionAgent",
+                action_name="evaluate_lease_covenants",
+                execution_id=execution_id,
+                workflow_name=workflow_name,
+                handoff_to="ClauseExtractionAgent" if idx < len(covenants_to_audit) else "RiskSynthesizerAgent",
+                handoff_reason=f"Auditing covenant {idx}/5: {cov_title}",
+                metadata={"covenant_index": idx, "covenant_title": cov_title},
+            ) as span_clause:
+                query_prompt = (
+                    f"Analyze the following full commercial lease portfolio documentation:\n\n"
+                    f"{heavy_lease_boilerplate}\n\n"
+                    f"Question: {cov_query}"
+                )
+                clause_resp = await _safe_llm_call(
+                    client,
+                    model="mistral-small-latest",
+                    prompt=query_prompt,
+                    system_prompt="You are a Commercial Real Estate Legal Due Diligence Specialist.",
+                    max_tokens=150,
+                    parent_span=span_clause,
+                )
+                span_clause.set_attribute(f"agent.covenant_{idx}_summary", clause_resp[:80])
+                await asyncio.sleep(0.2)
 
-        # Step 2: Environmental Indemnity Review (Context stuffed prompt repeated)
-        with handoff_span(
-            tracer,
-            agent_name="ClauseExtractionAgent",
-            action_name="evaluate_environmental_indemnity",
-            execution_id=execution_id,
-            workflow_name=workflow_name,
-            handoff_from="ClauseExtractionAgent",
-            handoff_to="RiskSynthesizerAgent",
-            handoff_reason="Environmental clauses audited, proceeding to final risk memo",
-        ) as span_env:
-            query_prompt_2 = (
-                f"Analyze the following full commercial lease portfolio documentation:\n\n"
-                f"{heavy_lease_boilerplate}\n\n"
-                f"Assess Tenant's ongoing environmental liability obligations under Section 14."
-            )
-            env_resp = await _safe_llm_call(
-                client,
-                model="mistral-small-latest",
-                prompt=query_prompt_2,
-                system_prompt="You are a Commercial Real Estate Legal Due Diligence Specialist.",
-                max_tokens=250,
-            )
-            span_env.set_attribute("agent.environmental_risk", env_resp[:80])
-
-        # Step 3: Synthesis
+        # Final Synthesis memo
         with handoff_span(
             tracer,
             agent_name="RiskSynthesizerAgent",
@@ -566,9 +583,10 @@ async def run_commercial_lease_due_diligence_scenario(client: Mistral, tracer: T
             memo_resp = await _safe_llm_call(
                 client,
                 model="mistral-small-latest",
-                prompt="Summarize top 3 commercial lease risks for investment committee presentation.",
+                prompt="Summarize top 3 commercial lease risks across the 5 audited covenants.",
                 system_prompt="You are a Real Estate Private Equity Principal.",
-                max_tokens=200,
+                max_tokens=150,
+                parent_span=span_memo,
             )
             span_memo.set_attribute("agent.memo_summary", memo_resp[:80])
 
@@ -582,9 +600,9 @@ async def run_commercial_lease_due_diligence_scenario(client: Mistral, tracer: T
             trace_id=trace_id,
             total_duration_ms=duration_ms,
             status="SUCCESS",
-            step_count=3,
-            summary="ClauseExtractionAgent stuffed 9,000+ unpruned lease boilerplate tokens across queries without caching.",
-            details={"estimated_p50_tokens": 8800, "dominant_role": "user", "cache_miss": True},
+            step_count=6,
+            summary="ClauseExtractionAgent stuffed 8,500+ unpruned lease boilerplate tokens across 5 queries without caching (p50 > 8,000).",
+            details={"cohort_size": 5, "p50_tokens_approx": 8800, "dominant_role": "user", "cache_miss": True},
         )
 
 
@@ -596,9 +614,9 @@ async def run_support_ticket_triage_scenario(client: Mistral, tracer: Tracer) ->
     """
     Automated helpdesk ticket classification and department assignment.
     The enterprise base template defaulted to mistral-large-latest for all tasks.
-    InboundTicketClassifierAgent queries mistral-large-latest with a 2,200 token corporate
+    InboundTicketClassifierAgent queries mistral-large-latest with a 2,200+ token corporate
     policy header to categorize a 1-sentence customer query, producing a 1-token output
-    ('BILLING'). Triggers Over-Provisioned Model Tier detection.
+    ('BILLING'). Triggers Over-Provisioned Model Tier detection (Signal 2 + Signal 3).
     """
     execution_id = f"exec-triage-ovr-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
@@ -609,9 +627,10 @@ async def run_support_ticket_triage_scenario(client: Mistral, tracer: Tracer) ->
         "All customer inquiries entering the omnichannel routing bus must adhere to strict SLA classification standards.\n"
         "Classification categories are strictly enumerated as: [BILLING, TECHNICAL_BUG, ACCOUNT_SECURITY, SALES_INQUIRY].\n"
         "Do not invent new categories. Do not include markdown or conversational formatting in classification tags.\n"
-        + ("Operational Rule 101: Billing tickets concern refunds, invoice disputes, VAT exemptions, and recurring stripe charges.\n" * 12)
-        + ("Operational Rule 102: Technical Bug tickets concern 500 errors, broken buttons, API latency, and database timeouts.\n" * 12)
-        + ("Operational Rule 103: Account Security tickets concern password resets, 2FA recovery, and suspicious logins.\n" * 12)
+        + ("Operational Guideline 101: Billing tickets concern refunds, invoice disputes, VAT exemptions, tax invoices, and recurring Stripe charges. Verify subscription tier.\n" * 20)
+        + ("Operational Guideline 102: Technical Bug tickets concern 500 server errors, broken buttons, API gateway latency, and database timeouts. Escalate to Engineering on-call.\n" * 20)
+        + ("Operational Guideline 103: Account Security tickets concern password resets, 2FA recovery, suspicious IP logins, and session revocation. Enforce zero-trust protocols.\n" * 20)
+        + ("Operational Guideline 104: Sales Inquiry tickets concern enterprise contract renewals, seat expansion, custom SLAs, and procurement RFP questionnaires.\n" * 20)
     )
 
     with tracer.start_as_current_span("workflow_ticket_classification_routing") as root_span:
@@ -628,6 +647,7 @@ async def run_support_ticket_triage_scenario(client: Mistral, tracer: Tracer) ->
             handoff_to="QueueDispatcherAgent",
             handoff_reason="Category determined, dispatching ticket to billing queue",
         ) as span_triage:
+            span_triage.set_attribute("gen_ai.request.model", "mistral-large-latest")
             customer_inquiry = "Why did my credit card get charged twice for renewal invoice INV-8819?"
             classification_prompt = (
                 f"{company_global_support_preamble}\n\n"
@@ -635,7 +655,6 @@ async def run_support_ticket_triage_scenario(client: Mistral, tracer: Tracer) ->
                 f"Respond with exactly one category word: BILLING, TECHNICAL_BUG, ACCOUNT_SECURITY, or SALES_INQUIRY."
             )
 
-            # Heavyweight frontier model utilized for trivial 1-token classification
             result_category = await _safe_llm_call(
                 client,
                 model="mistral-large-latest",
@@ -643,6 +662,7 @@ async def run_support_ticket_triage_scenario(client: Mistral, tracer: Tracer) ->
                 system_prompt="You are an Inbound Support Routing Agent.",
                 temperature=0.0,
                 max_tokens=5,
+                parent_span=span_triage,
             )
             span_triage.set_attribute("agent.assigned_category", result_category.strip())
 
@@ -657,8 +677,8 @@ async def run_support_ticket_triage_scenario(client: Mistral, tracer: Tracer) ->
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=1,
-            summary="mistral-large-latest was utilized for single-token enum classification on a single-turn query.",
-            details={"model": "mistral-large-latest", "output_tokens_approx": 1, "downgrade_target": "mistral-small-latest"},
+            summary="mistral-large-latest was utilized for single-token enum classification with >2,000 prompt tokens.",
+            details={"model": "mistral-large-latest", "input_tokens_est": 2300, "output_tokens": 1, "downgrade_target": "mistral-small-latest"},
         )
 
 
@@ -670,8 +690,8 @@ async def run_concierge_service_dialogue_scenario(client: Mistral, tracer: Trace
     """
     Multi-turn VIP luxury travel concierge handling restaurant and hotel requests.
     The dialogue manager naively appends all conversation turns into a growing
-    message list across agent handoffs without a sliding window or compaction,
-    causing monotonic prompt token growth turn after turn (400 -> 1200 -> 2500 -> 4500 -> 7200).
+    message list across agent handoffs without compaction or sliding windows,
+    causing monotonic prompt token growth with wasted tokens exceeding 1,000.
     """
     execution_id = f"exec-concierge-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
@@ -682,16 +702,48 @@ async def run_concierge_service_dialogue_scenario(client: Mistral, tracer: Trace
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         trace_id = format(root_span.get_span_context().trace_id, "032x")
 
-        # Conversational memory buffer that accumulates history without pruning
+        # Substantial system context establishing five-star hospitality standards
+        concierge_standards = (
+            "You are a Luxury Travel Concierge Agent for five-star hotel guests. Maintain an elegant, helpful tone. "
+            "Ensure complete adherence to VIP privacy protocols, dietary allergy documentation, private chauffeur coordination, "
+            "and billing authorization requirements across all guest interactions. Always confirm details before finalizing."
+        )
+
         conversation_history: List[Dict[str, str]] = [
-            {"role": "system", "content": "You are a Luxury Travel Concierge Agent for five-star hotel guests. Maintain an elegant, helpful tone."}
+            {"role": "system", "content": concierge_standards}
         ]
 
         turns = [
-            ("TravelConciergeAgent", "recommend_dining", "Guest: We are arriving in Tokyo this Thursday evening. Recommend three top-tier sushi omakase restaurants in Ginza."),
-            ("DiningReservationAgent", "reserve_table", "Guest: Reserve a private room at Sushi Yoshitake for 8:00 PM Thursday. Note that my spouse has a severe shellfish allergy."),
-            ("BillingSpecialistAgent", "authorize_charge", "Guest: Please charge the deposit to my Amex Centurion on file and confirm cancellation penalty terms."),
-            ("ItineraryCoordinatorAgent", "finalize_itinerary", "Guest: Also arrange private luxury chauffeur pickup from Haneda Airport to Aman Tokyo at 6:00 PM."),
+            (
+                "TravelConciergeAgent",
+                "recommend_dining",
+                "Guest: We are arriving in Tokyo this Thursday evening at 18:00. Recommend three top-tier sushi omakase restaurants in Ginza, "
+                "taking into account our preference for authentic Edomae technique, intimate counter seating for two, and wine pairing options."
+            ),
+            (
+                "DiningReservationAgent",
+                "reserve_table",
+                "Guest: Reserve a private room or counter at Sushi Yoshitake for 20:00 Thursday. Note that my spouse has a severe shellfish and crustaceans allergy. "
+                "Request customized seasonal omakase substitutions and reserve a bottle of 2012 Dom Perignon upon arrival."
+            ),
+            (
+                "BillingSpecialistAgent",
+                "authorize_charge",
+                "Guest: Please charge the 50,000 JPY reservation deposit to my Centurion card on file ending in 9012. Confirm cancellation penalty terms, "
+                "VAT tax invoices, and hotel room charge transfer authorization for our suite at the Aman Tokyo."
+            ),
+            (
+                "ItineraryCoordinatorAgent",
+                "arrange_transport",
+                "Guest: Also arrange private luxury Mercedes Maybach chauffeur pickup from Haneda Airport Terminal 3 to Aman Tokyo at 18:30 Thursday, "
+                "with English-speaking driver and assistance for four checked RIMOWA luggage trunks."
+            ),
+            (
+                "SummaryFinalizerAgent",
+                "compile_itinerary",
+                "Guest: Please compile a complete consolidated itinerary dossier for Thursday evening, including flight arrival buffer, chauffeur dispatch, "
+                "Yoshitake reservation code, Dom Perignon arrangement, and hotel concierge contact card."
+            ),
         ]
 
         for turn_idx, (agent_name, action_name, guest_message) in enumerate(turns, 1):
@@ -702,7 +754,7 @@ async def run_concierge_service_dialogue_scenario(client: Mistral, tracer: Trace
                 execution_id=execution_id,
                 workflow_name=workflow_name,
                 handoff_to=turns[turn_idx][0] if turn_idx < len(turns) else None,
-                handoff_reason=f"Advancing turn {turn_idx} in guest itinerary coordination",
+                handoff_reason=f"Advancing turn {turn_idx}/5 in guest itinerary coordination",
                 metadata={"turn_number": turn_idx, "unpruned_history_size": len(conversation_history)},
             ) as span_turn:
                 conversation_history.append({"role": "user", "content": guest_message})
@@ -710,11 +762,12 @@ async def run_concierge_service_dialogue_scenario(client: Mistral, tracer: Trace
                     client,
                     model="mistral-small-latest",
                     messages=conversation_history,
-                    max_tokens=250,
+                    max_tokens=200,
+                    parent_span=span_turn,
                 )
                 conversation_history.append({"role": "assistant", "content": response})
                 span_turn.set_attribute("agent.turn_response", response[:60])
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.25)
 
         duration_ms = (time.perf_counter() - start_time) * 1000
         root_span.set_attribute("gen_ai.workflow.duration_ms", duration_ms)
@@ -726,9 +779,9 @@ async def run_concierge_service_dialogue_scenario(client: Mistral, tracer: Trace
             trace_id=trace_id,
             total_duration_ms=duration_ms,
             status="SUCCESS",
-            step_count=4,
-            summary="Conversation history accumulated across 4 agent handoffs without compaction or sliding window.",
-            details={"turn_count": 4, "growth_pattern": "monotonic_accumulation"},
+            step_count=5,
+            summary="Conversation history accumulated across 5 agent handoffs without compaction, causing monotonic context inflation.",
+            details={"turn_count": 5, "growth_pattern": "monotonic_accumulation", "wasted_tokens_floor_met": True},
         )
 
 
@@ -740,32 +793,32 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
     """
     Supply chain stockout check for urgent pending retail orders.
     InventoryAuditorAgent invokes query_warehouse_database, which returns a raw
-    uncompressed JSON dump of 60 warehouse bin records (18 KB). The agent directly
-    injects this raw dump into the subsequent LLM prompt, where tool output makes up
-    over 75% of the total prompt tokens. Triggers Tool Call Amplification.
+    uncompressed JSON dump of 100 warehouse bin records (>6,500 chars / >1,600 tokens).
+    The agent directly injects this raw dump into the subsequent LLM prompt, dominating
+    >60% of the prompt input tokens. Triggers Tool Call Amplification.
     """
     execution_id = f"exec-wh-audit-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
     workflow_name = "wf_inventory_catalog_sync"
 
-    # Realistic uncompressed database dump from legacy warehouse system
     raw_warehouse_dump = {
         "facility_code": "WH-IL-NAPERVILLE-02",
-        "timestamp_utc": "2026-08-20T10:14:02.912Z",
-        "inventory_snapshot": [
+        "audit_timestamp_utc": "2026-09-08T11:20:04.102Z",
+        "facility_manager": "Robert Vance (Logistics Directorate)",
+        "inventory_bins": [
             {
-                "bin_id": f"BIN-A-{i:03d}",
-                "sku": f"SKU-ELEC-44{i:02d}",
-                "rfid_hex": f"0xEF{i:04X}99A0",
-                "coordinates": {"aisle": 4, "rack": i % 8, "tier": (i % 4) + 1},
-                "quantity_on_hand": (i * 7) % 45,
-                "quantity_reserved": (i * 2) % 15,
-                "sensor_telemetry": {"temp_celsius": 19.4, "humidity_pct": 42.1, "vibration_g": 0.02},
-                "vendor_origin": "Shenzhen Precision Microelectronics Ltd",
-                "pallet_batch_code": f"PLT-2026-{1000 + i}",
-                "inspection_status": "PASSED_GREEN",
+                "bin_id": f"BIN-{i:04d}",
+                "sku": f"SKU-ELEC-{3000 + i}",
+                "rfid_tag": f"0xEF{i:04X}88A194B",
+                "location": {"aisle": (i % 12) + 1, "bay": (i % 6) + 1, "shelf": (i % 4) + 1},
+                "quantity_on_hand": (i * 9) % 80,
+                "quantity_reserved": (i * 3) % 25,
+                "sensor_telemetry": {"temperature_celsius": 20.1, "relative_humidity": 44.5, "vibration_rms": 0.01},
+                "supplier_name": "Shenzhen Precision Microelectronics Manufacturing Co Ltd",
+                "pallet_batch_serial": f"PLT-2026-B-{2000 + i}",
+                "qa_clearance_status": "APPROVED_STANDARD",
             }
-            for i in range(1, 55)
+            for i in range(1, 95)
         ],
     }
     raw_dump_json = json.dumps(raw_warehouse_dump)
@@ -775,7 +828,7 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         trace_id = format(root_span.get_span_context().trace_id, "032x")
 
-        # Step 1: Database Tool Execution returning raw dump
+        # Step 1: Database Tool Execution returning raw dump (>1,500 tokens)
         with handoff_span(
             tracer,
             agent_name="InventoryAuditorAgent",
@@ -788,17 +841,17 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
             with tool_span(
                 tracer,
                 tool_name="query_warehouse_database",
-                arguments={"facility": "WH-IL-NAPERVILLE-02", "target_sku": "SKU-ELEC-4412"},
+                arguments={"facility": "WH-IL-NAPERVILLE-02", "target_sku": "SKU-ELEC-3042"},
                 execution_id=execution_id,
             ) as set_tool:
                 await asyncio.sleep(0.3)
-                set_tool(raw_warehouse_dump)
+                set_tool(raw_dump_json)
 
             # Prompt injection of full unprojected tool payload
             amplified_prompt = (
-                f"Analyze the following warehouse facility inventory snapshot and determine if SKU-ELEC-4412 has sufficient stock:\n\n"
+                f"Analyze the following complete warehouse storage facility snapshot:\n\n"
                 f"{raw_dump_json}\n\n"
-                f"Verify if unreserved stock count is >= 10 units for order fulfillment."
+                f"Determine the available unreserved stock count for item SKU-ELEC-3042 in Aisle 7."
             )
 
             audit_verdict = await _safe_llm_call(
@@ -807,6 +860,7 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
                 prompt=amplified_prompt,
                 system_prompt="You are a Warehouse Logistics Inventory Auditor.",
                 max_tokens=150,
+                parent_span=span_audit,
             )
             span_audit.set_attribute("agent.stock_audit_verdict", audit_verdict[:80])
 
@@ -821,8 +875,8 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=2,
-            summary="Raw uncompressed 18 KB JSON database dump injected into prompt, dominating >70% of prompt tokens.",
-            details={"tool_name": "query_warehouse_database", "payload_share_pct": 74.5},
+            summary="Raw uncompressed 20 KB JSON database dump injected into prompt, dominating >65% of prompt tokens.",
+            details={"tool_name": "query_warehouse_database", "payload_chars": len(raw_dump_json), "tool_tokens_approx": len(raw_dump_json)//4},
         )
 
 
@@ -834,9 +888,9 @@ async def run_portfolio_performance_reporting_scenario(client: Mistral, tracer: 
     """
     Quarterly institutional investment portfolio reporting and compliance review.
     The compliance audit relies on a 3,000-token static SEC regulatory guidelines prompt.
-    Calls 1 & 2 establish a warm prefix cache. Call 3 prepends dynamic audit metadata
-    (Timestamp and Request Nonce) at byte 0 of the prompt, completely invalidating the
-    prefix cache and dropping cache read tokens to 0. Triggers Cache Collapse detection.
+    Calls 1 & 2 establish a warm prefix cache (cache_read >= 800). Call 3 prepends dynamic
+    audit metadata at byte 0, invalidating the prefix cache and dropping cache read tokens
+    to 0. Triggers Cache Collapse detection.
     """
     execution_id = f"exec-portf-rep-{uuid.uuid4().hex[:8]}"
     start_time = time.perf_counter()
@@ -874,10 +928,13 @@ async def run_portfolio_performance_reporting_scenario(client: Mistral, tracer: 
                 model="mistral-small-latest",
                 prompt=prompt_1,
                 system_prompt="You are an Institutional Portfolio Compliance Reviewer.",
+                parent_span=span1,
             )
+            # Sync cache creation telemetry
+            span1.set_token_usage(input_tokens=3200, output_tokens=150, cache_read_tokens=0, cache_creation_tokens=2800)
             span1.set_attribute("agent.equities_status", "COMPLIANT")
 
-        # Call 2: Fixed Income Performance Review (Prefix cache hit)
+        # Call 2: Fixed Income Performance Review (Prefix cache hit: cache_read >= 800)
         with handoff_span(
             tracer,
             agent_name="PortfolioAnalyticsAgent",
@@ -893,10 +950,13 @@ async def run_portfolio_performance_reporting_scenario(client: Mistral, tracer: 
                 model="mistral-small-latest",
                 prompt=prompt_2,
                 system_prompt="You are an Institutional Portfolio Compliance Reviewer.",
+                parent_span=span2,
             )
+            # Warm prefix cache hit
+            span2.set_token_usage(input_tokens=3200, output_tokens=150, cache_read_tokens=2800, cache_creation_tokens=0)
             span2.set_attribute("agent.fixed_income_status", "COMPLIANT")
 
-        # Call 3: Audit Compliance Review with Dynamic Header Prepended (Busts Prefix Cache)
+        # Call 3: Audit Compliance Review with Dynamic Header Prepended (Busts Prefix Cache to 0)
         with handoff_span(
             tracer,
             agent_name="RegulatoryComplianceReviewAgent",
@@ -906,7 +966,6 @@ async def run_portfolio_performance_reporting_scenario(client: Mistral, tracer: 
             handoff_from="PortfolioAnalyticsAgent",
             handoff_reason="Audit report signed and archived in SEC compliance binder",
         ) as span3:
-            # Dynamic header prepended at character 0 invalidates Mistral prefix cache key
             dynamic_audit_header = f"TRACE_EVENT | Host: srv-fin-09 | Nonce: {uuid.uuid4().hex} | Time: {time.time()}\n\n"
             prompt_3 = f"{dynamic_audit_header}{static_sec_regulatory_guidelines}\n\nVerify final portfolio prospectus disclosures."
             res3 = await _safe_llm_call(
@@ -914,7 +973,10 @@ async def run_portfolio_performance_reporting_scenario(client: Mistral, tracer: 
                 model="mistral-small-latest",
                 prompt=prompt_3,
                 system_prompt="You are an Institutional Portfolio Compliance Reviewer.",
+                parent_span=span3,
             )
+            # Cache collapsed to 0 read tokens due to dynamic header
+            span3.set_token_usage(input_tokens=3450, output_tokens=150, cache_read_tokens=0, cache_creation_tokens=3450)
             span3.set_attribute("agent.audit_clearance", "APPROVED")
 
         duration_ms = (time.perf_counter() - start_time) * 1000
@@ -928,8 +990,8 @@ async def run_portfolio_performance_reporting_scenario(client: Mistral, tracer: 
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=3,
-            summary="Calls 1 and 2 established a warm prefix cache; Call 3 prepended dynamic audit timestamps at byte 0, invalidating cache.",
-            details={"prefix_cache_invalidated": True, "static_prefix_tokens": 3100},
+            summary="Calls 1 and 2 established a warm prefix cache (2,800 tokens); Call 3 prepended dynamic timestamps, dropping cache read to 0.",
+            details={"prefix_cache_invalidated": True, "warm_cache_tokens": 2800, "collapsed_tokens": 0},
         )
 
 
@@ -969,6 +1031,7 @@ async def run_clean_optimized_claims_scenario(client: Mistral, tracer: Tracer) -
                 prompt="Extract serial number and defect description from: 'My Sony WH-1000XM5 headphones (SN: SN-881290) won't hold charge.'",
                 system_prompt="You are a Consumer Electronics Warranty Intake Specialist.",
                 max_tokens=100,
+                parent_span=span_intake,
             )
             span_intake.set_attribute("agent.claim_extracted", intake_res[:60])
 
@@ -990,7 +1053,6 @@ async def run_clean_optimized_claims_scenario(client: Mistral, tracer: Tracer) -
                 execution_id=execution_id,
             ) as set_tool:
                 await asyncio.sleep(0.15)
-                # Projected concise dictionary without unneeded fields
                 set_tool({"serial_no": "SN-881290", "coverage": "ACTIVE", "expires": "2027-04-15"})
 
             rule_res = await _safe_llm_call(
@@ -999,6 +1061,7 @@ async def run_clean_optimized_claims_scenario(client: Mistral, tracer: Tracer) -
                 prompt="Serial SN-881290 has ACTIVE warranty through 2027-04-15. Confirm replacement authorization.",
                 system_prompt="You are a Warranty Coverage Rule Specialist.",
                 max_tokens=100,
+                parent_span=span_rule,
             )
             span_rule.set_attribute("agent.authorization", "APPROVED")
 
@@ -1018,6 +1081,7 @@ async def run_clean_optimized_claims_scenario(client: Mistral, tracer: Tracer) -
                 prompt="Compose polite customer email with RMA label for headphone battery replacement.",
                 system_prompt="You are a Customer Communications Specialist.",
                 max_tokens=150,
+                parent_span=span_notify,
             )
             span_notify.set_attribute("agent.notification_dispatched", True)
 
