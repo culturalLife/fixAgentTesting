@@ -2,12 +2,12 @@
   {
     "scenario_name": "Vendor Invoice Reconciliation",
     "anomaly_type": "RUNAWAY_RETRIES",
-    "execution_id": "exec-inv-rec-0aaad165",
-    "trace_id": "ea4e74c89af1ce0c16c9e819855fc478",
+    "execution_id": "exec-inv-rec-10cc8a13",
+    "trace_id": "a33448b001833ea65d4c8847372a4410",
     "status": "SUCCESS",
-    "duration_ms": 11677.76,
+    "duration_ms": 10801.18,
     "step_count": 5,
-    "timestamp": "2026-09-08T09:29:15.218690+00:00",
+    "timestamp": "2026-09-09T07:07:43.553003+00:00",
     "summary": "Invoice parsing encountered JSON markdown formatting errors, requiring 3 retry attempts before succeeding.",
     "details": {
       "max_attempts": 3,
@@ -18,12 +18,12 @@
   {
     "scenario_name": "Dual Compliance Screening",
     "anomaly_type": "REDUNDANT_CALLS",
-    "execution_id": "exec-wire-comp-cd69729a",
-    "trace_id": "e9c2fd4d962871ec5062245e656c1ca3",
+    "execution_id": "exec-wire-comp-a7115bf9",
+    "trace_id": "6237c7e16820c26c16e310c437bab94b",
     "status": "SUCCESS",
-    "duration_ms": 4845.38,
+    "duration_ms": 4980.91,
     "step_count": 3,
-    "timestamp": "2026-09-08T09:29:15.218705+00:00",
+    "timestamp": "2026-09-09T07:07:43.553019+00:00",
     "summary": "OFAC, AML, and Audit agents issued identical compliance policy queries without shared memoization.",
     "details": {
       "duplicate_calls_count": 3,
@@ -33,12 +33,12 @@
   {
     "scenario_name": "Mortgage Underwriting & Settlement Pipeline",
     "anomaly_type": "FAILED_EXECUTIONS",
-    "execution_id": "exec-mort-orig-124d62f9",
-    "trace_id": "c57e50c7b7b88073abe3259cccad98a8",
+    "execution_id": "exec-mort-orig-64f4822c",
+    "trace_id": "e223a13f02a6ddf628a58adaf5bdca03",
     "status": "FAILED",
-    "duration_ms": 6396.53,
+    "duration_ms": 6467.3,
     "step_count": 4,
-    "timestamp": "2026-09-08T09:29:15.218711+00:00",
+    "timestamp": "2026-09-09T07:07:43.553025+00:00",
     "summary": "Workflow completed credit, income, and appraisal underwriting but failed at final wire settlement due to missing schema field.",
     "details": {
       "error": "KeyError: 'wire_routing_number'",
@@ -52,15 +52,16 @@
   {
     "scenario_name": "Commercial Lease Due Diligence",
     "anomaly_type": "EXPENSIVE_PROMPT",
-    "execution_id": "exec-lease-audit-f7328cb3",
-    "trace_id": "0551b1dacfd3ea96b2b2af8cd390327a",
+    "execution_id": "exec-lease-audit-238e52a6",
+    "trace_id": "40f066518e6eecba982d9230c0f250e3",
     "status": "SUCCESS",
-    "duration_ms": 5964.16,
-    "step_count": 3,
-    "timestamp": "2026-09-08T09:29:15.218716+00:00",
-    "summary": "ClauseExtractionAgent stuffed 9,000+ unpruned lease boilerplate tokens across queries without caching.",
+    "duration_ms": 10034.28,
+    "step_count": 6,
+    "timestamp": "2026-09-09T07:07:43.553029+00:00",
+    "summary": "ClauseExtractionAgent stuffed 8,500+ unpruned lease boilerplate tokens across 5 queries without caching (p50 > 8,000).",
     "details": {
-      "estimated_p50_tokens": 8800,
+      "cohort_size": 5,
+      "p50_tokens_approx": 8800,
       "dominant_role": "user",
       "cache_miss": true
     }
@@ -68,73 +69,77 @@
   {
     "scenario_name": "Customer Support Ticket Triage",
     "anomaly_type": "OVER_PROVISIONED_MODEL",
-    "execution_id": "exec-triage-ovr-cd628282",
-    "trace_id": "9e8df4330e55192733876f59b743b528",
+    "execution_id": "exec-triage-ovr-26ae12a1",
+    "trace_id": "42beb84460ddb29f655408f2452d3837",
     "status": "SUCCESS",
-    "duration_ms": 681.12,
+    "duration_ms": 1032.61,
     "step_count": 1,
-    "timestamp": "2026-09-08T09:29:15.218720+00:00",
-    "summary": "mistral-large-latest was utilized for single-token enum classification on a single-turn query.",
+    "timestamp": "2026-09-09T07:07:43.553032+00:00",
+    "summary": "mistral-large-latest was utilized for single-token enum classification with >2,000 prompt tokens.",
     "details": {
       "model": "mistral-large-latest",
-      "output_tokens_approx": 1,
+      "input_tokens_est": 2300,
+      "output_tokens": 1,
       "downgrade_target": "mistral-small-latest"
     }
   },
   {
     "scenario_name": "VIP Travel Concierge Multi-Turn Dialogue",
     "anomaly_type": "CONTEXT_GROWTH_LEAK",
-    "execution_id": "exec-concierge-34fd9c31",
-    "trace_id": "803c004df33d5b59c3acf3bf06fd5e6f",
+    "execution_id": "exec-concierge-c8bea934",
+    "trace_id": "48ec543e2bf9bedfa0236d5629808c2a",
     "status": "SUCCESS",
-    "duration_ms": 8969.47,
-    "step_count": 4,
-    "timestamp": "2026-09-08T09:29:15.218723+00:00",
-    "summary": "Conversation history accumulated across 4 agent handoffs without compaction or sliding window.",
+    "duration_ms": 9747.09,
+    "step_count": 5,
+    "timestamp": "2026-09-09T07:07:43.553036+00:00",
+    "summary": "Conversation history accumulated across 5 agent handoffs without compaction, causing monotonic context inflation.",
     "details": {
-      "turn_count": 4,
-      "growth_pattern": "monotonic_accumulation"
+      "turn_count": 5,
+      "growth_pattern": "monotonic_accumulation",
+      "wasted_tokens_floor_met": true
     }
   },
   {
     "scenario_name": "Retail Supply Chain Inventory Audit",
     "anomaly_type": "TOOL_CALL_AMPLIFICATION",
-    "execution_id": "exec-wh-audit-348b84be",
-    "trace_id": "17f70502a5cbf0a2cc1608d23c9f977b",
+    "execution_id": "exec-wh-audit-433ad43e",
+    "trace_id": "8e1356a6055a59c1b1c48a0a07ae6725",
     "status": "SUCCESS",
-    "duration_ms": 2318.46,
+    "duration_ms": 2235.98,
     "step_count": 2,
-    "timestamp": "2026-09-08T09:29:15.218727+00:00",
-    "summary": "Raw uncompressed 18 KB JSON database dump injected into prompt, dominating >70% of prompt tokens.",
+    "timestamp": "2026-09-09T07:07:43.553039+00:00",
+    "summary": "Raw uncompressed 20 KB JSON database dump injected into prompt, dominating >65% of prompt tokens.",
     "details": {
       "tool_name": "query_warehouse_database",
-      "payload_share_pct": 74.5
+      "payload_chars": 41503,
+      "tool_tokens_approx": 10375
     }
   },
   {
     "scenario_name": "Quantitative Portfolio Strategy Reporting",
     "anomaly_type": "CACHE_COLLAPSE",
-    "execution_id": "exec-portf-rep-173031cb",
-    "trace_id": "3bb39d8b9face98647e3d8e9fb259004",
+    "execution_id": "exec-portf-rep-5e34292e",
+    "trace_id": "0034fa394cd11aa1069ec01dcc208a64",
     "status": "SUCCESS",
-    "duration_ms": 7145.84,
+    "duration_ms": 7197.82,
     "step_count": 3,
-    "timestamp": "2026-09-08T09:29:15.218730+00:00",
-    "summary": "Calls 1 and 2 established a warm prefix cache; Call 3 prepended dynamic audit timestamps at byte 0, invalidating cache.",
+    "timestamp": "2026-09-09T07:07:43.553042+00:00",
+    "summary": "Calls 1 and 2 established a warm prefix cache (2,800 tokens); Call 3 prepended dynamic timestamps, dropping cache read to 0.",
     "details": {
       "prefix_cache_invalidated": true,
-      "static_prefix_tokens": 3100
+      "warm_cache_tokens": 2800,
+      "collapsed_tokens": 0
     }
   },
   {
     "scenario_name": "High-Efficiency Warranty Claims Baseline",
     "anomaly_type": "CLEAN_OPTIMAL_BASELINE",
-    "execution_id": "exec-opt-claim-7089e841",
-    "trace_id": "b5f56ae71a7a00a624a6b0b2c42abc27",
+    "execution_id": "exec-opt-claim-d726eccd",
+    "trace_id": "358b18b442edd4262b526a7f04534d41",
     "status": "SUCCESS",
-    "duration_ms": 2985.8,
+    "duration_ms": 2874.17,
     "step_count": 3,
-    "timestamp": "2026-09-08T09:29:15.218734+00:00",
+    "timestamp": "2026-09-09T07:07:43.553045+00:00",
     "summary": "Clean baseline workflow using right-sized model, projected tool outputs, and zero token waste.",
     "details": {
       "wasted_tokens": 0,
