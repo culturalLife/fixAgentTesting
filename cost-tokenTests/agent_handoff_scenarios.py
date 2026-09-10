@@ -847,10 +847,26 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
                 await asyncio.sleep(0.3)
                 set_tool(raw_dump_json)
 
-            # Prompt injection of full unprojected tool payload
+            # Project only essential fields for inventory audit
+            projected_data = {
+                "facility_code": raw_warehouse_dump["facility_code"],
+                "inventory_bins": [
+                    {
+                        "bin_id": bin["bin_id"],
+                        "sku": bin["sku"],
+                        "location": bin["location"],
+                        "quantity_on_hand": bin["quantity_on_hand"],
+                        "quantity_reserved": bin["quantity_reserved"]
+                    }
+                    for bin in raw_warehouse_dump["inventory_bins"]
+                ]
+            }
+            projected_dump_json = json.dumps(projected_data)
+            
+            # Prompt injection of projected tool payload
             amplified_prompt = (
-                f"Analyze the following complete warehouse storage facility snapshot:\n\n"
-                f"{raw_dump_json}\n\n"
+                f"Analyze the following warehouse inventory data:\n\n"
+                f"{projected_dump_json}\n\n"
                 f"Determine the available unreserved stock count for item SKU-ELEC-3042 in Aisle 7."
             )
 
