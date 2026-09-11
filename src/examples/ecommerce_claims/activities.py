@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import json
 import os
 from datetime import timedelta
@@ -164,31 +165,51 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         span.set_attribute("input.customer_id", claim.customer_id)
         span.set_attribute("cache.hit", False)
 
-        try:
-            # Trim input fields to prevent prompt amplification
-            claim_id_trimmed = _trim_tool_output(claim.claim_id)
-            order_id_trimmed = _trim_tool_output(claim.order_id)
-            claim_type_trimmed = _trim_tool_output(claim.claim_type)
-            customer_message_trimmed = _trim_tool_output(claim.customer_message)
+        # Retry mechanism with max_attempts to prevent unproductive retry loops
+        max_attempts = 3
+        last_error = None
+        
+        for attempt in range(1, max_attempts + 1):
+            span.set_attribute("wf.activity.attempt", attempt)
+            span.set_attribute("agent.metadata.attempt", str(attempt))
             
-            prompt = (
-                f"You are an intake specialist for an e-commerce support pipeline.\n"
-                f"Classify the following customer claim:\n"
-                f"Claim ID: {claim_id_trimmed}\n"
-                f"Order ID: {order_id_trimmed}\n"
-                f"Claim Type: {claim_type_trimmed}\n"
-                f"Amount: ${claim.claim_amount}\n"
-                f"Message: {customer_message_trimmed}\n\n"
-                f"Return a valid JSON object matching the IntakeClassification schema:\n"
-                f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
-                f"- urgency: low, normal, high, or critical\n"
-                f"- policy_applicable: string name of policy clause\n"
-                f"- requires_warehouse_lookup: boolean\n"
-                f"- summary: concise 1-2 sentence description"
-            )
+            try:
+                # Trim input fields to prevent prompt amplification
+                claim_id_trimmed = _trim_tool_output(claim.claim_id)
+                order_id_trimmed = _trim_tool_output(claim.order_id)
+                claim_type_trimmed = _trim_tool_output(claim.claim_type)
+                customer_message_trimmed = _trim_tool_output(claim.customer_message)
+                
+                # Build corrective prompt prefix based on attempt number
+                if attempt == 1:
+                    prompt_prefix = ""
+                elif attempt == 2:
+                    prompt_prefix = (f"CORRECTION: Your previous response failed JSON validation. "
+                                   f"Return ONLY a valid JSON object with no markdown fences, no extra text. "
+                                   f"Strictly follow the schema.\n\n")
+                else:  # attempt == 3
+                    prompt_prefix = (f"FINAL ATTEMPT: Previous attempts failed JSON parsing. "
+                                   f"Return ONLY raw JSON, no markdown, no explanations. "
+                                   f"Schema: claim_category, urgency, policy_applicable, requires_warehouse_lookup, summary.\n\n")
+                
+                prompt = (
+                    f"{prompt_prefix}You are an intake specialist for an e-commerce support pipeline.\n"
+                    f"Classify the following customer claim:\n"
+                    f"Claim ID: {claim_id_trimmed}\n"
+                    f"Order ID: {order_id_trimmed}\n"
+                    f"Claim Type: {claim_type_trimmed}\n"
+                    f"Amount: ${claim.claim_amount}\n"
+                    f"Message: {customer_message_trimmed}\n\n"
+                    f"Return a valid JSON object matching the IntakeClassification schema:\n"
+                    f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
+                    f"- urgency: low, normal, high, or critical\n"
+                    f"- policy_applicable: string name of policy clause\n"
+                    f"- requires_warehouse_lookup: boolean\n"
+                    f"- summary: concise 1-2 sentence description"
+                )
 
-            # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
-            res = client.chat.complete(
+                # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
+                res = client.chat.complete(
                 model="mistral-small-latest",
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
@@ -232,69 +253,125 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                     }
                 ]
             )
-            # Handle both regular content and tool call responses with defensive checks
-            message = res.choices[0].message
-            raw_content = None
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                # Extract arguments from the tool call
-                tool_call = message.tool_calls[0]
-                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
-                    raw_content = tool_call.function.arguments
-            if raw_content is None and hasattr(message, 'content'):
-                # Fallback to regular content
-                raw_content = message.content
+                # Handle both regular content and tool call responses with defensive checks
+                message = res.choices[0].message
+                raw_content = None
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    # Extract arguments from the tool call
+                    tool_call = message.tool_calls[0]
+                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                        raw_content = tool_call.function.arguments
+                if raw_content is None and hasattr(message, 'content'):
+                    # Fallback to regular content
+                    raw_content = message.content
+                
+                # Ensure raw_content is a string before JSON parsing
+                if not isinstance(raw_content, str):
+                    raw_content = str(raw_content) if raw_content is not None else "{}"
+                
+                try:
+                    parsed = json.loads(raw_content)
+                except (json.JSONDecodeError, TypeError):
+                except (json.JSONDecodeError, TypeError) as exc:
+                    last_error = exc
+                    record_span_exception(span, exc)
+                    span.set_attribute(f"gen_ai.activity.attempt_{attempt}.error", str(exc))
+                    # On non-final attempts, sleep briefly before retry
+                    if attempt < max_attempts:
+                        await asyncio.sleep(0.3)
+                        continue
+                    else:
+                        # Final attempt failed - will route to human review
+                try:
+                    parsed = json.loads(raw_content)
+                    # If JSON parsing succeeds, break out of retry loop
+                    break
+                except (json.JSONDecodeError, TypeError) as exc:
+                    last_error = exc
+                    record_span_exception(span, exc)
+                    span.set_attribute(f"gen_ai.activity.attempt_{attempt}.error", str(exc))
+                    # On non-final attempts, sleep briefly before retry
+                    if attempt < max_attempts:
+                        await asyncio.sleep(0.3)
+                        continue
+                    else:
+                        # Final attempt failed - will route to human review
+                        parsed = {}
+                        break
+                # Trim tool return payloads to prevent prompt amplification
+                if isinstance(parsed, dict):
+                    parsed = _trim_tool_output(parsed)
+
+                summary_str = parsed.get("summary", "Customer requested resolution.")
+                if isinstance(summary_str, (dict, list)):
+                    summary_str = json.dumps(summary_str)
+
+                # Ensure parsed is a dict before accessing keys
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                
+            # End of retry loop
             
-            # Ensure raw_content is a string before JSON parsing
-            if not isinstance(raw_content, str):
-                raw_content = str(raw_content) if raw_content is not None else "{}"
+            # If all attempts failed, route to human-review queue
+            if last_error is not None:
+                span.set_attribute("gen_ai.activity.status", "HUMAN_REVIEW_REQUIRED")
+                span.set_attribute("gen_ai.activity.error", "JSON parsing failed after all retry attempts")
+                span.set_attribute("routing.destination", "human-review-queue")
+                raise ValueError(
+                    f"Classification failed after {max_attempts} attempts. "
+                    f"Routing to human-review queue. Error: {str(last_error)}"
+                )
             
-            try:
-                parsed = json.loads(raw_content)
-            except (json.JSONDecodeError, TypeError):
-                # Fallback to empty dict if parsing fails
-                parsed = {}
-
-            # Trim tool return payloads to prevent prompt amplification
-            if isinstance(parsed, dict):
-                parsed = _trim_tool_output(parsed)
-
-            summary_str = parsed.get("summary", "Customer requested resolution.")
-            if isinstance(summary_str, (dict, list)):
-                summary_str = json.dumps(summary_str)
-
             # Ensure parsed is a dict before accessing keys
             if not isinstance(parsed, dict):
                 parsed = {}
             
-            result = IntakeClassification(
-                claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
-                urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
-                policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
-                requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
-                summary=str(summary_str),
-            )
+                result = IntakeClassification(
+                    claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
+                    urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
+                    policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
+                    requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
+                    summary=str(summary_str),
+                )
 
-            # Cache the result to avoid redundant API calls for the same prompt
-            _intake_classification_cache[cache_key] = result
+                # Validate that we got all required fields before considering it a success
+                if not all(key in parsed for key in ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]):
+                    raise ValueError(f"Incomplete JSON response: missing required fields. Got keys: {list(parsed.keys())}")
+                
+                # Cache the result to avoid redundant API calls for the same prompt
+                _intake_classification_cache[cache_key] = result
 
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            # Safely serialize result to JSON, handling MagicMock objects
-            try:
-                result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
-                # Trim the result to prevent prompt amplification
-                result_json_trimmed = _trim_tool_output(result_json)
-                span.set_attribute("gen_ai.activity.result", result_json_trimmed)
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json_trimmed, "final_results": result_json_trimmed}))
-            except (TypeError, AttributeError):
-                # Fallback if serialization fails
-                span.set_attribute("gen_ai.activity.result", "{}")
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
-            return result
-
-        except Exception as exc:
-            record_span_exception(span, exc)
-            span.set_attribute("gen_ai.activity.status", "FAILED")
-            raise exc
+                span.set_attribute("gen_ai.activity.status", "SUCCESS")
+                # Safely serialize result to JSON, handling MagicMock objects
+                try:
+                    result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
+                    # Trim the result to prevent prompt amplification
+                    result_json_trimmed = _trim_tool_output(result_json)
+                    span.set_attribute("gen_ai.activity.result", result_json_trimmed)
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json_trimmed, "final_results": result_json_trimmed}))
+                except (TypeError, AttributeError):
+                    # Fallback if serialization fails
+                    span.set_attribute("gen_ai.activity.result", "{}")
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
+                return result
+            
+            except Exception as exc:
+                last_error = exc
+                record_span_exception(span, exc)
+                span.set_attribute("gen_ai.activity.status", "FAILED")
+                span.set_attribute("wf.activity.attempt.failed", True)
+                
+                # If this is not the last attempt, continue to retry
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.1 * attempt)  # Exponential backoff
+                    continue
+                
+                # Final attempt failed - raise non-retriable error
+                span.set_attribute("gen_ai.activity.status", "FAILED_FINAL")
+                span.set_attribute("agent.metadata.human_review_required", True)
+                raise ValueError(f"intake_and_classify_claim failed after {max_attempts} attempts. "
+                               f"Last error: {str(last_error)}. "
+                               f"Routing to human review queue.")
 
 
 # ---------------------------------------------------------------------------
