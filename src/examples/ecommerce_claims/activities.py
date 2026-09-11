@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio
+import hashlib
 import json
 import os
 from datetime import timedelta
@@ -22,68 +22,8 @@ from .models import (
     UrgencyLevel,
 )
 
-# Maximum allowed tokens for a single tool response to prevent prompt amplification
-MAX_TOOL_RESPONSE_TOKENS = 500
-# Maximum allowed characters for a single tool response (roughly 4 chars per token)
-MAX_TOOL_RESPONSE_CHARS = MAX_TOOL_RESPONSE_TOKENS * 4
-
 SERVICE_NAME = "ecommerce-claims-worker"
 WORKFLOW_NAME = "ecommerce-claims-triage-workflow"
-
-
-def _trim_tool_output(output: Any) -> Any:
-    """
-    Trim tool output to prevent prompt amplification.
-    For structured data (lists/dicts), return a count + sample.
-    For strings, truncate with a marker if too large.
-    """
-    if output is None:
-        return None
-    
-    # If output is a string, truncate if too large
-    if isinstance(output, str):
-        if len(output) <= MAX_TOOL_RESPONSE_CHARS:
-            return output
-        else:
-            truncated = output[:MAX_TOOL_RESPONSE_CHARS]
-            return f"{truncated}[...truncated (full data available in tool execution logs)]"
-    
-    # If output is a list, return count + first few items
-    if isinstance(output, list):
-        if len(output) == 0:
-            return []
-        # For large lists, return count + sample
-        if len(output) > 10:
-            return {
-                "_count": len(output),
-                "_sample": output[:3],
-                "_truncated": True,
-                "_message": f"Full list of {len(output)} items available in tool execution logs"
-            }
-        else:
-            # Recursively trim each item in the list
-            return [_trim_tool_output(item) for item in output]
-    
-    # If output is a dict, recursively trim values
-    if isinstance(output, dict):
-        trimmed = {}
-        for key, value in output.items():
-            trimmed[key] = _trim_tool_output(value)
-        
-        # Check if the serialized dict is too large
-        serialized = json.dumps(trimmed)
-        if len(serialized) > MAX_TOOL_RESPONSE_CHARS:
-            # For large dicts, return a summary
-            return {
-                "_keys": list(output.keys()),
-                "_count": len(output),
-                "_truncated": True,
-                "_message": f"Full data available in tool execution logs"
-            }
-        return trimmed
-    
-    # For other types (int, float, bool), return as-is
-    return output
 
 
 def _get_mistral_client() -> Mistral:
@@ -97,7 +37,9 @@ def _get_mistral_client() -> Mistral:
 # ---------------------------------------------------------------------------
 # ACTIVITY 1: Intake & Classification Agent (FAQIntakeAgent)
 # ---------------------------------------------------------------------------
-# Cache for storing classification results by claim_id to avoid redundant API calls
+# Per-execution cache for storing LLM responses keyed by canonical prompt hash
+_llm_response_cache: Dict[str, Dict[str, Any]] = {}
+# Per-execution cache for storing intake classification results keyed by claim_id
 _intake_classification_cache: Dict[str, IntakeClassification] = {}
 
 @workflows.activity(
@@ -118,22 +60,39 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
     
-    # Create a comprehensive cache key based on all fields that contribute to the prompt
-    # to avoid redundant API calls for identical prompts
-    cache_key_parts = [
-        str(claim.claim_id),
-        str(claim.order_id),
-        str(claim.claim_type),
-        str(claim.claim_amount),
-        str(claim.customer_message)
-    ]
-    cache_key = "|".join(cache_key_parts)
+    # Get execution ID for per-execution caching
+    tracer = get_telemetry_tracer_instance(SERVICE_NAME)
+    execution_id = get_current_execution_id()
     
-    # Check cache first to avoid redundant API calls for the same prompt
-    if cache_key in _intake_classification_cache:
-        cached_result = _intake_classification_cache[cache_key]
-        tracer = get_telemetry_tracer_instance(SERVICE_NAME)
-        execution_id = get_current_execution_id()
+    # Initialize per-execution cache if it doesn't exist
+    if execution_id not in _llm_response_cache:
+        _llm_response_cache[execution_id] = {}
+    
+    # Generate the prompt content for hashing
+    user_prompt = (
+        f"You are an intake specialist for an e-commerce support pipeline.\n"
+        f"Classify the following customer claim:\n"
+        f"Claim ID: {claim.claim_id}\n"
+        f"Order ID: {claim.order_id}\n"
+        f"Claim Type: {claim.claim_type}\n"
+        f"Amount: ${claim.claim_amount}\n"
+        f"Message: {claim.customer_message}\n\n"
+        f"Return a valid JSON object matching the IntakeClassification schema:\n"
+        f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
+        f"- urgency: low, normal, high, or critical\n"
+        f"- policy_applicable: string name of policy clause\n"
+        f"- requires_warehouse_lookup: boolean\n"
+        f"- summary: concise 1-2 sentence description"
+    )
+    
+    # Create canonical prompt hash (SHA-256 of system + user content, ignoring timestamps)
+    system_prompt = "You are an intake specialist for an e-commerce support pipeline."
+    canonical_prompt_content = f"{system_prompt}||{user_prompt}"
+    prompt_hash = hashlib.sha256(canonical_prompt_content.encode()).hexdigest()
+    
+    # Check if this exact prompt has already been processed in this execution
+    if prompt_hash in _llm_response_cache[execution_id]:
+        cached_result = _llm_response_cache[execution_id][prompt_hash]
         with tracer.start_as_current_span("intake_and_classify_span") as span:
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
@@ -143,16 +102,10 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("input.claim_id", claim.claim_id)
             span.set_attribute("input.customer_id", claim.customer_id)
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("cache.hit", True)
-            cached_result_json = cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)
-            # Trim the cached result to prevent prompt amplification
-            cached_result_json_trimmed = _trim_tool_output(cached_result_json)
-            span.set_attribute("gen_ai.activity.result", cached_result_json_trimmed)
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result_json_trimmed, "final_results": cached_result_json_trimmed}))
+            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
         return cached_result
     
-    tracer = get_telemetry_tracer_instance(SERVICE_NAME)
-    execution_id = get_current_execution_id()
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
     with tracer.start_as_current_span("intake_and_classify_span") as span:
@@ -163,55 +116,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
         span.set_attribute("input.claim_id", claim.claim_id)
         span.set_attribute("input.customer_id", claim.customer_id)
-        span.set_attribute("cache.hit", False)
 
-        # Retry mechanism with max_attempts to prevent unproductive retry loops
-        max_attempts = 3
-        last_error = None
-        
-        for attempt in range(1, max_attempts + 1):
-            span.set_attribute("wf.activity.attempt", attempt)
-            span.set_attribute("agent.metadata.attempt", str(attempt))
-            
-            try:
-                # Trim input fields to prevent prompt amplification
-                claim_id_trimmed = _trim_tool_output(claim.claim_id)
-                order_id_trimmed = _trim_tool_output(claim.order_id)
-                claim_type_trimmed = _trim_tool_output(claim.claim_type)
-                customer_message_trimmed = _trim_tool_output(claim.customer_message)
-                
-                # Build corrective prompt prefix based on attempt number
-                if attempt == 1:
-                    prompt_prefix = ""
-                elif attempt == 2:
-                    prompt_prefix = (f"CORRECTION: Your previous response failed JSON validation. "
-                                   f"Return ONLY a valid JSON object with no markdown fences, no extra text. "
-                                   f"Strictly follow the schema.\n\n")
-                else:  # attempt == 3
-                    prompt_prefix = (f"FINAL ATTEMPT: Previous attempts failed JSON parsing. "
-                                   f"Return ONLY raw JSON, no markdown, no explanations. "
-                                   f"Schema: claim_category, urgency, policy_applicable, requires_warehouse_lookup, summary.\n\n")
-                
-                prompt = (
-                    f"{prompt_prefix}You are an intake specialist for an e-commerce support pipeline.\n"
-                    f"Classify the following customer claim:\n"
-                    f"Claim ID: {claim_id_trimmed}\n"
-                    f"Order ID: {order_id_trimmed}\n"
-                    f"Claim Type: {claim_type_trimmed}\n"
-                    f"Amount: ${claim.claim_amount}\n"
-                    f"Message: {customer_message_trimmed}\n\n"
-                    f"Return a valid JSON object matching the IntakeClassification schema:\n"
-                    f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
-                    f"- urgency: low, normal, high, or critical\n"
-                    f"- policy_applicable: string name of policy clause\n"
-                    f"- requires_warehouse_lookup: boolean\n"
-                    f"- summary: concise 1-2 sentence description"
-                )
-
-                # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
-                res = client.chat.complete(
+        try:
+            # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
+            res = client.chat.complete(
                 model="mistral-small-latest",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": user_prompt}],
                 response_format={"type": "json_object"},
                 max_tokens=150,
                 temperature=0.1,
@@ -253,125 +163,63 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                     }
                 ]
             )
-                # Handle both regular content and tool call responses with defensive checks
-                message = res.choices[0].message
-                raw_content = None
-                if hasattr(message, 'tool_calls') and message.tool_calls:
-                    # Extract arguments from the tool call
-                    tool_call = message.tool_calls[0]
-                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
-                        raw_content = tool_call.function.arguments
-                if raw_content is None and hasattr(message, 'content'):
-                    # Fallback to regular content
-                    raw_content = message.content
-                
-                # Ensure raw_content is a string before JSON parsing
-                if not isinstance(raw_content, str):
-                    raw_content = str(raw_content) if raw_content is not None else "{}"
-                
-                try:
-                    parsed = json.loads(raw_content)
-                except (json.JSONDecodeError, TypeError):
-                except (json.JSONDecodeError, TypeError) as exc:
-                    last_error = exc
-                    record_span_exception(span, exc)
-                    span.set_attribute(f"gen_ai.activity.attempt_{attempt}.error", str(exc))
-                    # On non-final attempts, sleep briefly before retry
-                    if attempt < max_attempts:
-                        await asyncio.sleep(0.3)
-                        continue
-                    else:
-                        # Final attempt failed - will route to human review
-                try:
-                    parsed = json.loads(raw_content)
-                    # If JSON parsing succeeds, break out of retry loop
-                    break
-                except (json.JSONDecodeError, TypeError) as exc:
-                    last_error = exc
-                    record_span_exception(span, exc)
-                    span.set_attribute(f"gen_ai.activity.attempt_{attempt}.error", str(exc))
-                    # On non-final attempts, sleep briefly before retry
-                    if attempt < max_attempts:
-                        await asyncio.sleep(0.3)
-                        continue
-                    else:
-                        # Final attempt failed - will route to human review
-                        parsed = {}
-                        break
-                # Trim tool return payloads to prevent prompt amplification
-                if isinstance(parsed, dict):
-                    parsed = _trim_tool_output(parsed)
-
-                summary_str = parsed.get("summary", "Customer requested resolution.")
-                if isinstance(summary_str, (dict, list)):
-                    summary_str = json.dumps(summary_str)
-
-                # Ensure parsed is a dict before accessing keys
-                if not isinstance(parsed, dict):
-                    parsed = {}
-                
-            # End of retry loop
+            # Handle both regular content and tool call responses with defensive checks
+            message = res.choices[0].message
+            raw_content = None
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                # Extract arguments from the tool call
+                tool_call = message.tool_calls[0]
+                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                    raw_content = tool_call.function.arguments
+            if raw_content is None and hasattr(message, 'content'):
+                # Fallback to regular content
+                raw_content = message.content
             
-            # If all attempts failed, route to human-review queue
-            if last_error is not None:
-                span.set_attribute("gen_ai.activity.status", "HUMAN_REVIEW_REQUIRED")
-                span.set_attribute("gen_ai.activity.error", "JSON parsing failed after all retry attempts")
-                span.set_attribute("routing.destination", "human-review-queue")
-                raise ValueError(
-                    f"Classification failed after {max_attempts} attempts. "
-                    f"Routing to human-review queue. Error: {str(last_error)}"
-                )
+            # Ensure raw_content is a string before JSON parsing
+            if not isinstance(raw_content, str):
+                raw_content = str(raw_content) if raw_content is not None else "{}"
             
+            try:
+                parsed = json.loads(raw_content)
+            except (json.JSONDecodeError, TypeError):
+                # Fallback to empty dict if parsing fails
+                parsed = {}
+
+            summary_str = parsed.get("summary", "Customer requested resolution.")
+            if isinstance(summary_str, (dict, list)):
+                summary_str = json.dumps(summary_str)
+
             # Ensure parsed is a dict before accessing keys
             if not isinstance(parsed, dict):
                 parsed = {}
             
-                result = IntakeClassification(
-                    claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
-                    urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
-                    policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
-                    requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
-                    summary=str(summary_str),
-                )
+            result = IntakeClassification(
+                claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
+                urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
+                policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
+                requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
+                summary=str(summary_str),
+            )
 
-                # Validate that we got all required fields before considering it a success
-                if not all(key in parsed for key in ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]):
-                    raise ValueError(f"Incomplete JSON response: missing required fields. Got keys: {list(parsed.keys())}")
-                
-                # Cache the result to avoid redundant API calls for the same prompt
-                _intake_classification_cache[cache_key] = result
+            # Cache the result using prompt hash to avoid duplicate LLM calls for identical prompts
+            _llm_response_cache[execution_id][prompt_hash] = result
 
-                span.set_attribute("gen_ai.activity.status", "SUCCESS")
-                # Safely serialize result to JSON, handling MagicMock objects
-                try:
-                    result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
-                    # Trim the result to prevent prompt amplification
-                    result_json_trimmed = _trim_tool_output(result_json)
-                    span.set_attribute("gen_ai.activity.result", result_json_trimmed)
-                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json_trimmed, "final_results": result_json_trimmed}))
-                except (TypeError, AttributeError):
-                    # Fallback if serialization fails
-                    span.set_attribute("gen_ai.activity.result", "{}")
-                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
-                return result
-            
-            except Exception as exc:
-                last_error = exc
-                record_span_exception(span, exc)
-                span.set_attribute("gen_ai.activity.status", "FAILED")
-                span.set_attribute("wf.activity.attempt.failed", True)
-                
-                # If this is not the last attempt, continue to retry
-                if attempt < max_attempts:
-                    await asyncio.sleep(0.1 * attempt)  # Exponential backoff
-                    continue
-                
-                # Final attempt failed - raise non-retriable error
-                span.set_attribute("gen_ai.activity.status", "FAILED_FINAL")
-                span.set_attribute("agent.metadata.human_review_required", True)
-                raise ValueError(f"intake_and_classify_claim failed after {max_attempts} attempts. "
-                               f"Last error: {str(last_error)}. "
-                               f"Routing to human review queue.")
+            span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            # Safely serialize result to JSON, handling MagicMock objects
+            try:
+                result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
+                span.set_attribute("gen_ai.activity.result", result_json)
+                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
+            except (TypeError, AttributeError):
+                # Fallback if serialization fails
+                span.set_attribute("gen_ai.activity.result", "{}")
+                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
+            return result
+
+        except Exception as exc:
+            record_span_exception(span, exc)
+            span.set_attribute("gen_ai.activity.status", "FAILED")
+            raise exc
 
 
 # ---------------------------------------------------------------------------
@@ -410,15 +258,13 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
                     "items": [{"sku": "SKU-9920", "name": "Wireless Noise-Canceling Headphones", "price": claim.claim_amount}],
                     "delivery_confirmed": True,
                 }
-                # Trim the output before storing to prevent prompt amplification
-                trimmed_order_data = _trim_tool_output(order_data)
-                tool_span.set_attribute("gen_ai.tool.result", json.dumps(trimmed_order_data))
+                tool_span.set_attribute("gen_ai.tool.result", json.dumps(order_data))
                 tool_span.set_attribute("gen_ai.activity.status", "SUCCESS")
                 tool_results.append(ToolExecutionResult(
                     tool_name="lookup_order_details",
                     arguments=tool_args,
                     status="SUCCESS",
-                    output=trimmed_order_data
+                    output=order_data
                 ))
 
             # 2. Tool Call: check_inventory_replacement (if replacement required)
@@ -430,15 +276,13 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
                     tool_span.set_attribute("gen_ai.tool.arguments", json.dumps(inv_args))
                     
                     inv_data = {"sku": "SKU-9920", "in_stock": 14, "available_for_reship": True}
-                    # Trim the output before storing to prevent prompt amplification
-                    trimmed_inv_data = _trim_tool_output(inv_data)
-                    tool_span.set_attribute("gen_ai.tool.result", json.dumps(trimmed_inv_data))
+                    tool_span.set_attribute("gen_ai.tool.result", json.dumps(inv_data))
                     tool_span.set_attribute("gen_ai.activity.status", "SUCCESS")
                     tool_results.append(ToolExecutionResult(
                         tool_name="check_warehouse_inventory",
                         arguments=inv_args,
                         status="SUCCESS",
-                        output=trimmed_inv_data
+                        output=inv_data
                     ))
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
@@ -475,15 +319,7 @@ async def evaluate_compliance_and_policy(
         span.set_attribute("gen_ai.workflow.description", "Evaluate return window, warranty clauses, and fraud risk score.")
 
         try:
-            # Trim tool outputs to prevent prompt amplification
-            trimmed_tools = []
-            for tool_result in tools:
-                tool_dict = tool_result.model_dump()
-                # Trim the output field specifically
-                if "output" in tool_dict:
-                    tool_dict["output"] = _trim_tool_output(tool_dict["output"])
-                trimmed_tools.append(tool_dict)
-            tools_json = json.dumps(trimmed_tools)
+            tools_json = json.dumps([t.model_dump() for t in tools])
             prompt = (
                 f"You are a compliance officer for e-commerce return policies.\n"
                 f"Evaluate this claim:\n"
