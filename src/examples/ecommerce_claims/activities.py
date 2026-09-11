@@ -117,10 +117,20 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
     
-    # Check cache first to avoid redundant API calls for the same claim
-    claim_id_str = str(claim.claim_id)
-    if claim_id_str in _intake_classification_cache:
-        cached_result = _intake_classification_cache[claim_id_str]
+    # Create a comprehensive cache key based on all fields that contribute to the prompt
+    # to avoid redundant API calls for identical prompts
+    cache_key_parts = [
+        str(claim.claim_id),
+        str(claim.order_id),
+        str(claim.claim_type),
+        str(claim.claim_amount),
+        str(claim.customer_message)
+    ]
+    cache_key = "|".join(cache_key_parts)
+    
+    # Check cache first to avoid redundant API calls for the same prompt
+    if cache_key in _intake_classification_cache:
+        cached_result = _intake_classification_cache[cache_key]
         tracer = get_telemetry_tracer_instance(SERVICE_NAME)
         execution_id = get_current_execution_id()
         with tracer.start_as_current_span("intake_and_classify_span") as span:
@@ -132,6 +142,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("input.claim_id", claim.claim_id)
             span.set_attribute("input.customer_id", claim.customer_id)
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            span.set_attribute("cache.hit", True)
             cached_result_json = cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)
             # Trim the cached result to prevent prompt amplification
             cached_result_json_trimmed = _trim_tool_output(cached_result_json)
@@ -151,6 +162,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
         span.set_attribute("input.claim_id", claim.claim_id)
         span.set_attribute("input.customer_id", claim.customer_id)
+        span.set_attribute("cache.hit", False)
 
         try:
             # Trim input fields to prevent prompt amplification
@@ -262,8 +274,8 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 summary=str(summary_str),
             )
 
-            # Cache the result to avoid redundant API calls for the same claim
-            _intake_classification_cache[claim_id_str] = result
+            # Cache the result to avoid redundant API calls for the same prompt
+            _intake_classification_cache[cache_key] = result
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
             # Safely serialize result to JSON, handling MagicMock objects
