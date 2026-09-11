@@ -60,39 +60,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
     
-    # Get execution ID for per-execution caching
-    tracer = get_telemetry_tracer_instance(SERVICE_NAME)
-    execution_id = get_current_execution_id()
-    
-    # Initialize per-execution cache if it doesn't exist
-    if execution_id not in _llm_response_cache:
-        _llm_response_cache[execution_id] = {}
-    
-    # Generate the prompt content for hashing
-    user_prompt = (
-        f"You are an intake specialist for an e-commerce support pipeline.\n"
-        f"Classify the following customer claim:\n"
-        f"Claim ID: {claim.claim_id}\n"
-        f"Order ID: {claim.order_id}\n"
-        f"Claim Type: {claim.claim_type}\n"
-        f"Amount: ${claim.claim_amount}\n"
-        f"Message: {claim.customer_message}\n\n"
-        f"Return a valid JSON object matching the IntakeClassification schema:\n"
-        f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
-        f"- urgency: low, normal, high, or critical\n"
-        f"- policy_applicable: string name of policy clause\n"
-        f"- requires_warehouse_lookup: boolean\n"
-        f"- summary: concise 1-2 sentence description"
-    )
-    
-    # Create canonical prompt hash (SHA-256 of system + user content, ignoring timestamps)
-    system_prompt = "You are an intake specialist for an e-commerce support pipeline."
-    canonical_prompt_content = f"{system_prompt}||{user_prompt}"
-    prompt_hash = hashlib.sha256(canonical_prompt_content.encode()).hexdigest()
-    
-    # Check if this exact prompt has already been processed in this execution
-    if prompt_hash in _llm_response_cache[execution_id]:
-        cached_result = _llm_response_cache[execution_id][prompt_hash]
+    # Check cache first to avoid redundant API calls for the same claim
+    claim_id_str = str(claim.claim_id)
+    if claim_id_str in _intake_classification_cache:
+        cached_result = _intake_classification_cache[claim_id_str]
+        tracer = get_telemetry_tracer_instance(SERVICE_NAME)
+        execution_id = get_current_execution_id()
         with tracer.start_as_current_span("intake_and_classify_span") as span:
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
@@ -106,120 +79,162 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
         return cached_result
     
+    tracer = get_telemetry_tracer_instance(SERVICE_NAME)
+    execution_id = get_current_execution_id()
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
-    with tracer.start_as_current_span("intake_and_classify_span") as span:
-        span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
-        span.set_attribute("gen_ai.workflow.execution_id", execution_id)
-        span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-        span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
-        span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
-        span.set_attribute("input.claim_id", claim.claim_id)
-        span.set_attribute("input.customer_id", claim.customer_id)
+    # Retry logic with max_attempts = 3
+    max_attempts = 3
+    last_exception = None
+    
+    # Initialize cache for this execution
+    if execution_id not in _llm_response_cache:
+        _llm_response_cache[execution_id] = {}
+    
+    # Define prompts for each attempt with corrective feedback
+    prompts_by_attempt = {
+        1: f"Classify this customer claim into structured categories. Return strict JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, and summary. Claim: {claim.customer_message}",
+        2: f"Correction: Previous attempt failed. Classify this customer claim into structured categories. Return STRICT JSON ONLY without markdown fences. Claim: {claim.customer_message}",
+        3: f"Final attempt: Classify this customer claim. Return RAW JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, summary. No markdown, no prose. Claim: {claim.customer_message}",
+    }
+    
+    for attempt in range(1, max_attempts + 1):
+        # Get the prompt for this attempt
+        user_prompt = prompts_by_attempt[attempt]
+        prompt_hash = hashlib.md5(user_prompt.encode()).hexdigest()
+        
+        # Check if we have a cached result for this exact prompt
+        if prompt_hash in _llm_response_cache[execution_id]:
+            cached_result = _llm_response_cache[execution_id][prompt_hash]
+            span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
+            return cached_result
 
-        try:
-            # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
-            res = client.chat.complete(
-                model="mistral-small-latest",
-                messages=[{"role": "user", "content": user_prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=150,
-                temperature=0.1,
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "extract_structured_claim_data",
-                            "description": "Extract and validate structured claim data using strict bullet JSON schema",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "claim_category": {
-                                        "type": "string",
-                                        "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
-                                        "description": "Category of the claim"
+        with tracer.start_as_current_span("intake_and_classify_span") as span:
+            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
+            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
+            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
+            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
+            span.set_attribute("input.claim_id", claim.claim_id)
+            span.set_attribute("input.customer_id", claim.customer_id)
+            span.set_attribute("wf.activity.attempt", attempt)
+
+            try:
+                # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
+                res = client.chat.complete(
+                    model="mistral-small-latest",
+                    messages=[{"role": "user", "content": user_prompt}],
+                    response_format={"type": "json_object"},
+                    max_tokens=150,
+                    temperature=0.1,
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "extract_structured_claim_data",
+                                "description": "Extract and validate structured claim data using strict bullet JSON schema",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "claim_category": {
+                                            "type": "string",
+                                            "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
+                                            "description": "Category of the claim"
+                                        },
+                                        "urgency": {
+                                            "type": "string",
+                                            "enum": ["low", "normal", "high", "critical"],
+                                            "description": "Urgency level of the claim"
+                                        },
+                                        "policy_applicable": {
+                                            "type": "string",
+                                            "description": "Name of the applicable policy clause"
+                                        },
+                                        "requires_warehouse_lookup": {
+                                            "type": "boolean",
+                                            "description": "Whether warehouse lookup is required"
+                                        },
+                                        "summary": {
+                                            "type": "string",
+                                            "description": "Concise 1-2 sentence description of the claim"
+                                        }
                                     },
-                                    "urgency": {
-                                        "type": "string",
-                                        "enum": ["low", "normal", "high", "critical"],
-                                        "description": "Urgency level of the claim"
-                                    },
-                                    "policy_applicable": {
-                                        "type": "string",
-                                        "description": "Name of the applicable policy clause"
-                                    },
-                                    "requires_warehouse_lookup": {
-                                        "type": "boolean",
-                                        "description": "Whether warehouse lookup is required"
-                                    },
-                                    "summary": {
-                                        "type": "string",
-                                        "description": "Concise 1-2 sentence description of the claim"
-                                    }
-                                },
-                                "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
+                                    "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
+                                }
                             }
                         }
-                    }
-                ]
-            )
-            # Handle both regular content and tool call responses with defensive checks
-            message = res.choices[0].message
-            raw_content = None
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                # Extract arguments from the tool call
-                tool_call = message.tool_calls[0]
-                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
-                    raw_content = tool_call.function.arguments
-            if raw_content is None and hasattr(message, 'content'):
-                # Fallback to regular content
-                raw_content = message.content
-            
-            # Ensure raw_content is a string before JSON parsing
-            if not isinstance(raw_content, str):
-                raw_content = str(raw_content) if raw_content is not None else "{}"
-            
-            try:
-                parsed = json.loads(raw_content)
-            except (json.JSONDecodeError, TypeError):
-                # Fallback to empty dict if parsing fails
-                parsed = {}
+                    ]
+                )
+                # Handle both regular content and tool call responses with defensive checks
+                message = res.choices[0].message
+                raw_content = None
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    # Extract arguments from the tool call
+                    tool_call = message.tool_calls[0]
+                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                        raw_content = tool_call.function.arguments
+                if raw_content is None and hasattr(message, 'content'):
+                    # Fallback to regular content
+                    raw_content = message.content
+                
+                # Ensure raw_content is a string before JSON parsing
+                if not isinstance(raw_content, str):
+                    raw_content = str(raw_content) if raw_content is not None else "{}"
+                
+                try:
+                    parsed = json.loads(raw_content)
+                except (json.JSONDecodeError, TypeError):
+                    # Fallback to empty dict if parsing fails
+                    parsed = {}
 
-            summary_str = parsed.get("summary", "Customer requested resolution.")
-            if isinstance(summary_str, (dict, list)):
-                summary_str = json.dumps(summary_str)
+                summary_str = parsed.get("summary", "Customer requested resolution.")
+                if isinstance(summary_str, (dict, list)):
+                    summary_str = json.dumps(summary_str)
 
-            # Ensure parsed is a dict before accessing keys
-            if not isinstance(parsed, dict):
-                parsed = {}
-            
-            result = IntakeClassification(
-                claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
-                urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
-                policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
-                requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
-                summary=str(summary_str),
-            )
+                # Ensure parsed is a dict before accessing keys
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                
+                result = IntakeClassification(
+                    claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
+                    urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
+                    policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
+                    requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
+                    summary=str(summary_str),
+                )
 
-            # Cache the result using prompt hash to avoid duplicate LLM calls for identical prompts
-            _llm_response_cache[execution_id][prompt_hash] = result
+                # Cache the result using prompt hash to avoid duplicate LLM calls for identical prompts
+                _llm_response_cache[execution_id][prompt_hash] = result
 
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            # Safely serialize result to JSON, handling MagicMock objects
-            try:
-                result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
-                span.set_attribute("gen_ai.activity.result", result_json)
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
-            except (TypeError, AttributeError):
-                # Fallback if serialization fails
-                span.set_attribute("gen_ai.activity.result", "{}")
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
-            return result
+                span.set_attribute("gen_ai.activity.status", "SUCCESS")
+                # Safely serialize result to JSON, handling MagicMock objects
+                try:
+                    result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
+                    span.set_attribute("gen_ai.activity.result", result_json)
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
+                except (TypeError, AttributeError):
+                    # Fallback if serialization fails
+                    span.set_attribute("gen_ai.activity.result", "{}")
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
+                return result
 
-        except Exception as exc:
-            record_span_exception(span, exc)
-            span.set_attribute("gen_ai.activity.status", "FAILED")
-            raise exc
+            except Exception as exc:
+                record_span_exception(span, exc)
+                span.set_attribute("gen_ai.activity.status", "FAILED")
+                last_exception = exc
+                
+                # On final attempt, raise the exception
+                if attempt == max_attempts:
+                    raise exc
+                # Otherwise, continue to next attempt
+                continue
+    
+    # If we exhausted all attempts without success, raise the last exception
+    if last_exception:
+        raise last_exception
+    raise ValueError("All retry attempts failed without a specific exception")
 
 
 # ---------------------------------------------------------------------------
