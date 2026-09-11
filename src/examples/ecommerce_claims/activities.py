@@ -21,8 +21,68 @@ from .models import (
     UrgencyLevel,
 )
 
+# Maximum allowed tokens for a single tool response to prevent prompt amplification
+MAX_TOOL_RESPONSE_TOKENS = 500
+# Maximum allowed characters for a single tool response (roughly 4 chars per token)
+MAX_TOOL_RESPONSE_CHARS = MAX_TOOL_RESPONSE_TOKENS * 4
+
 SERVICE_NAME = "ecommerce-claims-worker"
 WORKFLOW_NAME = "ecommerce-claims-triage-workflow"
+
+
+def _trim_tool_output(output: Any) -> Any:
+    """
+    Trim tool output to prevent prompt amplification.
+    For structured data (lists/dicts), return a count + sample.
+    For strings, truncate with a marker if too large.
+    """
+    if output is None:
+        return None
+    
+    # If output is a string, truncate if too large
+    if isinstance(output, str):
+        if len(output) <= MAX_TOOL_RESPONSE_CHARS:
+            return output
+        else:
+            truncated = output[:MAX_TOOL_RESPONSE_CHARS]
+            return f"{truncated}[...truncated (full data available in tool execution logs)]"
+    
+    # If output is a list, return count + first few items
+    if isinstance(output, list):
+        if len(output) == 0:
+            return []
+        # For large lists, return count + sample
+        if len(output) > 10:
+            return {
+                "_count": len(output),
+                "_sample": output[:3],
+                "_truncated": True,
+                "_message": f"Full list of {len(output)} items available in tool execution logs"
+            }
+        else:
+            # Recursively trim each item in the list
+            return [_trim_tool_output(item) for item in output]
+    
+    # If output is a dict, recursively trim values
+    if isinstance(output, dict):
+        trimmed = {}
+        for key, value in output.items():
+            trimmed[key] = _trim_tool_output(value)
+        
+        # Check if the serialized dict is too large
+        serialized = json.dumps(trimmed)
+        if len(serialized) > MAX_TOOL_RESPONSE_CHARS:
+            # For large dicts, return a summary
+            return {
+                "_keys": list(output.keys()),
+                "_count": len(output),
+                "_truncated": True,
+                "_message": f"Full data available in tool execution logs"
+            }
+        return trimmed
+    
+    # For other types (int, float, bool), return as-is
+    return output
 
 
 def _get_mistral_client() -> Mistral:
@@ -72,8 +132,11 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("input.claim_id", claim.claim_id)
             span.set_attribute("input.customer_id", claim.customer_id)
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
+            cached_result_json = cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)
+            # Trim the cached result to prevent prompt amplification
+            cached_result_json_trimmed = _trim_tool_output(cached_result_json)
+            span.set_attribute("gen_ai.activity.result", cached_result_json_trimmed)
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result_json_trimmed, "final_results": cached_result_json_trimmed}))
         return cached_result
     
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
@@ -90,14 +153,20 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         span.set_attribute("input.customer_id", claim.customer_id)
 
         try:
+            # Trim input fields to prevent prompt amplification
+            claim_id_trimmed = _trim_tool_output(claim.claim_id)
+            order_id_trimmed = _trim_tool_output(claim.order_id)
+            claim_type_trimmed = _trim_tool_output(claim.claim_type)
+            customer_message_trimmed = _trim_tool_output(claim.customer_message)
+            
             prompt = (
                 f"You are an intake specialist for an e-commerce support pipeline.\n"
                 f"Classify the following customer claim:\n"
-                f"Claim ID: {claim.claim_id}\n"
-                f"Order ID: {claim.order_id}\n"
-                f"Claim Type: {claim.claim_type}\n"
+                f"Claim ID: {claim_id_trimmed}\n"
+                f"Order ID: {order_id_trimmed}\n"
+                f"Claim Type: {claim_type_trimmed}\n"
                 f"Amount: ${claim.claim_amount}\n"
-                f"Message: {claim.customer_message}\n\n"
+                f"Message: {customer_message_trimmed}\n\n"
                 f"Return a valid JSON object matching the IntakeClassification schema:\n"
                 f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
                 f"- urgency: low, normal, high, or critical\n"
@@ -173,6 +242,10 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 # Fallback to empty dict if parsing fails
                 parsed = {}
 
+            # Trim tool return payloads to prevent prompt amplification
+            if isinstance(parsed, dict):
+                parsed = _trim_tool_output(parsed)
+
             summary_str = parsed.get("summary", "Customer requested resolution.")
             if isinstance(summary_str, (dict, list)):
                 summary_str = json.dumps(summary_str)
@@ -196,8 +269,10 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             # Safely serialize result to JSON, handling MagicMock objects
             try:
                 result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
-                span.set_attribute("gen_ai.activity.result", result_json)
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
+                # Trim the result to prevent prompt amplification
+                result_json_trimmed = _trim_tool_output(result_json)
+                span.set_attribute("gen_ai.activity.result", result_json_trimmed)
+                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json_trimmed, "final_results": result_json_trimmed}))
             except (TypeError, AttributeError):
                 # Fallback if serialization fails
                 span.set_attribute("gen_ai.activity.result", "{}")
@@ -246,13 +321,15 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
                     "items": [{"sku": "SKU-9920", "name": "Wireless Noise-Canceling Headphones", "price": claim.claim_amount}],
                     "delivery_confirmed": True,
                 }
-                tool_span.set_attribute("gen_ai.tool.result", json.dumps(order_data))
+                # Trim the output before storing to prevent prompt amplification
+                trimmed_order_data = _trim_tool_output(order_data)
+                tool_span.set_attribute("gen_ai.tool.result", json.dumps(trimmed_order_data))
                 tool_span.set_attribute("gen_ai.activity.status", "SUCCESS")
                 tool_results.append(ToolExecutionResult(
                     tool_name="lookup_order_details",
                     arguments=tool_args,
                     status="SUCCESS",
-                    output=order_data
+                    output=trimmed_order_data
                 ))
 
             # 2. Tool Call: check_inventory_replacement (if replacement required)
@@ -264,13 +341,15 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
                     tool_span.set_attribute("gen_ai.tool.arguments", json.dumps(inv_args))
                     
                     inv_data = {"sku": "SKU-9920", "in_stock": 14, "available_for_reship": True}
-                    tool_span.set_attribute("gen_ai.tool.result", json.dumps(inv_data))
+                    # Trim the output before storing to prevent prompt amplification
+                    trimmed_inv_data = _trim_tool_output(inv_data)
+                    tool_span.set_attribute("gen_ai.tool.result", json.dumps(trimmed_inv_data))
                     tool_span.set_attribute("gen_ai.activity.status", "SUCCESS")
                     tool_results.append(ToolExecutionResult(
                         tool_name="check_warehouse_inventory",
                         arguments=inv_args,
                         status="SUCCESS",
-                        output=inv_data
+                        output=trimmed_inv_data
                     ))
 
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
@@ -307,7 +386,15 @@ async def evaluate_compliance_and_policy(
         span.set_attribute("gen_ai.workflow.description", "Evaluate return window, warranty clauses, and fraud risk score.")
 
         try:
-            tools_json = json.dumps([t.model_dump() for t in tools])
+            # Trim tool outputs to prevent prompt amplification
+            trimmed_tools = []
+            for tool_result in tools:
+                tool_dict = tool_result.model_dump()
+                # Trim the output field specifically
+                if "output" in tool_dict:
+                    tool_dict["output"] = _trim_tool_output(tool_dict["output"])
+                trimmed_tools.append(tool_dict)
+            tools_json = json.dumps(trimmed_tools)
             prompt = (
                 f"You are a compliance officer for e-commerce return policies.\n"
                 f"Evaluate this claim:\n"
