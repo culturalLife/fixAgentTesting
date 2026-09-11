@@ -153,6 +153,8 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
 
         max_attempts = 3
         parsed_items = None
+        execution_failed = False
+        extraction_err_msg = None
 
         for attempt in range(1, max_attempts + 1):
             action_name = f"extract_invoice_line_items_{attempt}"
@@ -193,9 +195,33 @@ async def run_vendor_invoice_reconciliation_scenario(client: Mistral, tracer: Tr
                         await asyncio.sleep(0.3)
                 else:
                     clean_json = "[{\"item_code\": \"SEAL-4402\", \"quantity\": 50, \"unit_price\": 38.50}]"
-                    parsed_items = json.loads(clean_json)
-                    span_ingest.set_attribute("agent.extraction.item_count", len(parsed_items))
-                    break
+                    try:
+                        parsed_items = json.loads(clean_json)
+                        span_ingest.set_attribute("agent.extraction.item_count", len(parsed_items))
+                        break
+                    except Exception as exc:
+                        execution_failed = True
+                        extraction_err_msg = f"JSONDecodeError: {exc}"
+                        record_span_error(span_ingest, exc)
+                        span_ingest.set_attribute("gen_ai.activity.status", "FAILED")
+                        span_ingest.set_attribute("status_code", "Error")
+
+        if execution_failed or parsed_items is None:
+            root_span.set_attribute("gen_ai.activity.status", "FAILED")
+            root_span.set_attribute("status_code", "Error")
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            root_span.set_attribute("gen_ai.workflow.duration_ms", duration_ms)
+            return ScenarioResult(
+                scenario_name="Vendor Invoice Reconciliation",
+                anomaly_type="RUNAWAY_RETRIES",
+                execution_id=execution_id,
+                trace_id=trace_id,
+                total_duration_ms=duration_ms,
+                status="FAILED",
+                step_count=1,
+                summary=f"Invoice parsing failed after all retry attempts: {extraction_err_msg}",
+                details={"max_attempts": max_attempts, "final_status": "FAILED", "error": extraction_err_msg},
+            )
 
         # Step 2: Vendor ERP Validation
         with handoff_span(
