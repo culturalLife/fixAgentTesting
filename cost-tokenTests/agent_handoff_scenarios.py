@@ -849,6 +849,22 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
     }
     raw_dump_json = json.dumps(raw_warehouse_dump)
 
+    # Project only essential fields for inventory audit
+    projected_data = {
+        "facility_code": raw_warehouse_dump["facility_code"],
+        "inventory_bins": [
+            {
+                "bin_id": bin["bin_id"],
+                "sku": bin["sku"],
+                "location": bin["location"],
+                "quantity_on_hand": bin["quantity_on_hand"],
+                "quantity_reserved": bin["quantity_reserved"]
+            }
+            for bin in raw_warehouse_dump["inventory_bins"]
+        ]
+    }
+    projected_dump_json = json.dumps(projected_data)
+
     with tracer.start_as_current_span("workflow_inventory_catalog_sync") as root_span:
         root_span.set_attribute("gen_ai.workflow.name", workflow_name)
         root_span.set_attribute("gen_ai.workflow.execution_id", execution_id)
@@ -871,23 +887,7 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
                 execution_id=execution_id,
             ) as set_tool:
                 await asyncio.sleep(0.3)
-                set_tool(raw_dump_json)
-
-            # Project only essential fields for inventory audit
-            projected_data = {
-                "facility_code": raw_warehouse_dump["facility_code"],
-                "inventory_bins": [
-                    {
-                        "bin_id": bin["bin_id"],
-                        "sku": bin["sku"],
-                        "location": bin["location"],
-                        "quantity_on_hand": bin["quantity_on_hand"],
-                        "quantity_reserved": bin["quantity_reserved"]
-                    }
-                    for bin in raw_warehouse_dump["inventory_bins"]
-                ]
-            }
-            projected_dump_json = json.dumps(projected_data)
+                set_tool(projected_dump_json)
             
             # Prompt injection of projected tool payload
             amplified_prompt = (
@@ -917,8 +917,8 @@ async def run_warehouse_inventory_audit_scenario(client: Mistral, tracer: Tracer
             total_duration_ms=duration_ms,
             status="SUCCESS",
             step_count=2,
-            summary="Raw uncompressed 20 KB JSON database dump injected into prompt, dominating >65% of prompt tokens.",
-            details={"tool_name": "query_warehouse_database", "payload_chars": len(raw_dump_json), "tool_tokens_approx": len(raw_dump_json)//4},
+            summary="Projected warehouse inventory data with essential fields only, reducing token usage.",
+            details={"tool_name": "query_warehouse_database", "payload_chars": len(projected_dump_json), "tool_tokens_approx": len(projected_dump_json)//4},
         )
 
 
