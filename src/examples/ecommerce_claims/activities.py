@@ -122,9 +122,21 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("wf.activity.attempt", attempt)
 
             try:
+                # Model routing check: estimate input tokens and downgrade if appropriate
+                # For extraction/classification tasks with high input:output ratio and no tool usage, use smaller model
+                input_tokens = len(user_prompt.split())
+                estimated_output_tokens = 50  # Conservative estimate for classification JSON output
+                uses_tools = False  # This is a simple classification task without actual tool calls
+                
+                # If input >> output and no tools used, downgrade to smaller/faster model
+                if input_tokens > 2 * estimated_output_tokens and not uses_tools:
+                    selected_model = "open-mistral-nemo"
+                else:
+                    selected_model = "mistral-small-latest"
+                
                 # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
                 res = client.chat.complete(
-                    model="mistral-small-latest",
+                    model=selected_model,
                     messages=[{"role": "user", "content": user_prompt}],
                     response_format={"type": "json_object"},
                     max_tokens=150,
