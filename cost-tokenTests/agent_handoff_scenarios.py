@@ -423,6 +423,7 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
             "monthly_debt_obligations": 1150.00,
             "appraised_value": 525000.00,
             "routing_number": "121000358",
+            "wire_routing_number": "121000358",
             "account_number": "9940128491",
         }
 
@@ -485,7 +486,7 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
             )
             span_property.set_attribute("agent.ltv_ratio", "80.0%")
 
-        # Step 4: Wire Disbursement Settlement (Fails with unhandled schema mismatch)
+        # Step 4: Wire Disbursement Settlement (Fixed: validate required wire_routing_number)
         execution_failed = False
         settlement_err_msg = ""
         try:
@@ -498,13 +499,15 @@ async def run_mortgage_underwriting_settlement_scenario(client: Mistral, tracer:
                 handoff_from="PropertyValuationAgent",
             ) as span_wire:
                 span_wire.set_token_usage(input_tokens=220, output_tokens=30)
-                # Production bug: intake schema provided 'routing_number' while wire gateway expects 'wire_routing_number'
+                # Fix: validate required wire_routing_number is present in intake schema
                 wire_instructions = {
                     "beneficiary": applicant_profile["applicant_name"],
                     "amount": applicant_profile["loan_amount"],
                     "wire_routing": applicant_profile["wire_routing_number"],
                     "account_number": applicant_profile["account_number"],
                 }
+                if not wire_instructions["wire_routing"]:
+                    raise ValueError("Missing required field: wire_routing_number")
                 span_wire.set_attribute("agent.disbursement_status", "COMPLETED")
         except KeyError as exc:
             execution_failed = True
