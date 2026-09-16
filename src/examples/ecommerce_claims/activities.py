@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 import mistralai.workflows as workflows
 from mistralai.client import Mistral
 
+# Maximum tokens allowed for tool response payloads to prevent prompt domination
+MAX_TOOL_RESPONSE_TOKENS = 2000
+# Maximum length for any single string field in tool responses
+MAX_FIELD_LENGTH = 500
+
 from src.telemetry import (
     get_current_execution_id,
     get_telemetry_tracer_instance,
@@ -24,6 +29,106 @@ from .models import (
 
 SERVICE_NAME = "ecommerce-claims-worker"
 WORKFLOW_NAME = "ecommerce-claims-triage-workflow"
+
+
+def _trim_tool_response_payload(data: Any, max_tokens: int = MAX_TOOL_RESPONSE_TOKENS) -> Any:
+    """
+    Trim tool return payloads to prevent them from dominating LLM prompts.
+    For structured data (lists/arrays), return count + sample instead of full dataset.
+    For large strings, truncate with a marker.
+    
+    Args:
+        data: The tool response data to trim
+        max_tokens: Maximum allowed tokens (approximated as chars/4)
+    
+    Returns:
+        Trimmed version of the data
+    """
+    # Estimate tokens by approximating chars / 4
+    def estimate_tokens(text: str) -> int:
+        return len(text) // 4 if text else 0
+    
+    def process_value(value: Any) -> Any:
+        if value is None:
+            return None
+        
+        # If it's a string, truncate if too long
+        if isinstance(value, str):
+            if estimate_tokens(value) > max_tokens:
+                truncated = value[:max_tokens * 4]  # Approximate char count
+                return f"{truncated}[...truncated (full data available)]"
+            return value
+        
+        # If it's a list/array with many items, return count + sample
+        if isinstance(value, list):
+            if len(value) > 10:  # More than 10 items, sample it
+                sample_size = min(5, len(value))
+                return {
+                    "_sample": value[:sample_size],
+                    "_total_count": len(value),
+                    "_truncated": True,
+                    "_message": f"Showing {sample_size} of {len(value)} items. Use specific queries for full data."
+                }
+            # Process each item in the list
+            return [process_value(item) for item in value]
+        
+        # If it's a dict, process each value
+        if isinstance(value, dict):
+            result = {}
+            for k, v in value.items():
+                # Truncate long string values in dict
+                if isinstance(v, str) and len(v) > MAX_FIELD_LENGTH:
+                    result[k] = f"{v[:MAX_FIELD_LENGTH]}...[truncated]"
+                else:
+                    result[k] = process_value(v)
+            return result
+        
+        return value
+    
+    return process_value(data)
+
+
+def _trim_string_for_prompt(text: str, max_chars: int = MAX_FIELD_LENGTH) -> str:
+    """
+    Trim a string to a safe length for inclusion in LLM prompts.
+    
+    Args:
+        text: The string to trim
+        max_chars: Maximum allowed characters
+    
+    Returns:
+        Trimmed string with truncation marker if needed
+    """
+    if not text:
+        return text
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...[truncated]"
+
+
+def _create_safe_prompt(base_prompt: str, data: Any, data_label: str = "data") -> str:
+    """
+    Create a prompt with safely trimmed data injection.
+    
+    Args:
+        base_prompt: The base prompt template with {data} placeholder
+        data: The data to inject
+        data_label: Label for the data in the prompt
+    
+    Returns:
+        Safe prompt with trimmed data
+    """
+    # Convert data to string
+    if isinstance(data, (dict, list)):
+        data_str = json.dumps(data)
+    else:
+        data_str = str(data)
+    
+    # Trim the data string
+    trimmed_data = _trim_string_for_prompt(data_str, max_chars=MAX_FIELD_LENGTH)
+    
+    # Replace the placeholder
+    return base_prompt.replace(f"{{{data_label}}}", trimmed_data)
 
 
 def _get_mistral_client() -> Mistral:
@@ -71,9 +176,11 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
             span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
             span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
             span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
             span.set_attribute("input.claim_id", claim.claim_id)
             span.set_attribute("input.customer_id", claim.customer_id)
+            span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
             span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
             span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
@@ -92,10 +199,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         _llm_response_cache[execution_id] = {}
     
     # Define prompts for each attempt with corrective feedback
+    # Use safe prompt creation to prevent large claim messages from dominating the prompt
+    safe_claim_message = _trim_string_for_prompt(claim.customer_message, max_chars=MAX_FIELD_LENGTH)
     prompts_by_attempt = {
-        1: f"Classify this customer claim into structured categories. Return strict JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, and summary. Claim: {claim.customer_message}",
-        2: f"Correction: Previous attempt failed. Classify this customer claim into structured categories. Return STRICT JSON ONLY without markdown fences. Claim: {claim.customer_message}",
-        3: f"Final attempt: Classify this customer claim. Return RAW JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, summary. No markdown, no prose. Claim: {claim.customer_message}",
+        1: f"Classify this customer claim into structured categories. Return strict JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, and summary. Claim: {safe_claim_message}",
+        2: f"Correction: Previous attempt failed. Classify this customer claim into structured categories. Return STRICT JSON ONLY without markdown fences. Claim: {safe_claim_message}",
+        3: f"Final attempt: Classify this customer claim. Return RAW JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, summary. No markdown, no prose. Claim: {safe_claim_message}",
     }
     
     for attempt in range(1, max_attempts + 1):
@@ -106,9 +215,6 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         # Check if we have a cached result for this exact prompt
         if prompt_hash in _llm_response_cache[execution_id]:
             cached_result = _llm_response_cache[execution_id][prompt_hash]
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
             return cached_result
 
         with tracer.start_as_current_span("intake_and_classify_span") as span:
@@ -116,10 +222,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
             span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
             span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
             span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
             span.set_attribute("input.claim_id", claim.claim_id)
             span.set_attribute("input.customer_id", claim.customer_id)
             span.set_attribute("wf.activity.attempt", attempt)
+            span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
 
             try:
                 # Model routing check: estimate input tokens and downgrade if appropriate
@@ -187,9 +295,15 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                     tool_call = message.tool_calls[0]
                     if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
                         raw_content = tool_call.function.arguments
+                        # Trim tool call arguments to prevent prompt domination
+                        if raw_content and len(raw_content) > MAX_FIELD_LENGTH:
+                            raw_content = _trim_string_for_prompt(raw_content, max_chars=MAX_FIELD_LENGTH)
                 if raw_content is None and hasattr(message, 'content'):
                     # Fallback to regular content
                     raw_content = message.content
+                    # Trim regular content if it's a tool response
+                    if raw_content and len(raw_content) > MAX_FIELD_LENGTH:
+                        raw_content = _trim_string_for_prompt(raw_content, max_chars=MAX_FIELD_LENGTH)
                 
                 # Ensure raw_content is a string before JSON parsing
                 if not isinstance(raw_content, str):
