@@ -181,9 +181,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("input.claim_id", claim.claim_id)
             span.set_attribute("input.customer_id", claim.customer_id)
             span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
+            # Apply field projection/compression to cached result before returning
+            cached_result_dict = cached_result.model_dump() if hasattr(cached_result, 'model_dump') else cached_result
+            trimmed_result = _trim_tool_response_payload(cached_result_dict)
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
+            span.set_attribute("gen_ai.activity.result", json.dumps(trimmed_result))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
         return cached_result
     
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
@@ -323,23 +326,28 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                 if not isinstance(parsed, dict):
                     parsed = {}
                 
+                # Apply field projection/compression to parsed data before creating result
+                # Trim large string fields to prevent prompt domination
+                trimmed_parsed = _trim_tool_response_payload(parsed)
+                
                 result = IntakeClassification(
-                    claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
-                    urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
-                    policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
-                    requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
-                    summary=str(summary_str),
+                    claim_category=ClaimType(str(trimmed_parsed.get("claim_category", "refund")).lower()),
+                    urgency=UrgencyLevel(str(trimmed_parsed.get("urgency", "normal")).lower()),
+                    policy_applicable=str(trimmed_parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
+                    requires_warehouse_lookup=bool(trimmed_parsed.get("requires_warehouse_lookup", True)),
+                    summary=str(trimmed_parsed.get("summary", summary_str)),
                 )
 
                 # Cache the result using prompt hash to avoid duplicate LLM calls for identical prompts
                 _llm_response_cache[execution_id][prompt_hash] = result
 
                 span.set_attribute("gen_ai.activity.status", "SUCCESS")
-                # Safely serialize result to JSON, handling MagicMock objects
+                # Apply field projection/compression to result before setting span attributes
+                result_dict = result.model_dump() if hasattr(result, 'model_dump') else result
+                trimmed_result = _trim_tool_response_payload(result_dict)
                 try:
-                    result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
-                    span.set_attribute("gen_ai.activity.result", result_json)
-                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
+                    span.set_attribute("gen_ai.activity.result", json.dumps(trimmed_result))
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
                 except (TypeError, AttributeError):
                     # Fallback if serialization fails
                     span.set_attribute("gen_ai.activity.result", "{}")
