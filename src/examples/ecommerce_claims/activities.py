@@ -189,17 +189,17 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
         return cached_result
     
+    # Initialize per-execution prompt cache if not exists
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
+    if execution_id not in _llm_response_cache:
+        _llm_response_cache[execution_id] = {}
+    
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
     # Retry logic with max_attempts = 3
     max_attempts = 3
     last_exception = None
-    
-    # Initialize cache for this execution
-    if execution_id not in _llm_response_cache:
-        _llm_response_cache[execution_id] = {}
     
     # Define prompts for each attempt with corrective feedback
     # Use safe prompt creation to prevent large claim messages from dominating the prompt
@@ -213,7 +213,11 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
     for attempt in range(1, max_attempts + 1):
         # Get the prompt for this attempt
         user_prompt = prompts_by_attempt[attempt]
-        prompt_hash = hashlib.md5(user_prompt.encode()).hexdigest()
+        # Create canonical prompt hash using SHA-256 of system + user content, ignoring timestamps
+        # Currently no explicit system prompt, so we use empty string for system content
+        system_content = ""
+        canonical_prompt = f"{system_content}|{user_prompt}"
+        prompt_hash = hashlib.sha256(canonical_prompt.encode()).hexdigest()
         
         # Check if we have a cached result for this exact prompt
         if prompt_hash in _llm_response_cache[execution_id]:
@@ -340,6 +344,8 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
 
                 # Cache the result using prompt hash to avoid duplicate LLM calls for identical prompts
                 _llm_response_cache[execution_id][prompt_hash] = result
+                # Also cache by claim_id to avoid redundant processing of the same claim
+                _intake_classification_cache[claim_id_str] = result
 
                 span.set_attribute("gen_ai.activity.status", "SUCCESS")
                 # Apply field projection/compression to result before setting span attributes
