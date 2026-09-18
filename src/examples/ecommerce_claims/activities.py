@@ -201,29 +201,44 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
     max_attempts = 3
     last_exception = None
     
-    # Define prompts for each attempt with corrective feedback
+    # Define a single, robust prompt for classification to avoid duplicate LLM calls
     # Use safe prompt creation to prevent large claim messages from dominating the prompt
     safe_claim_message = _trim_string_for_prompt(claim.customer_message, max_chars=MAX_FIELD_LENGTH)
-    prompts_by_attempt = {
-        1: f"Classify this customer claim into structured categories. Return strict JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, and summary. Claim: {safe_claim_message}",
-        2: f"Correction: Previous attempt failed. Classify this customer claim into structured categories. Return STRICT JSON ONLY without markdown fences. Claim: {safe_claim_message}",
-        3: f"Final attempt: Classify this customer claim. Return RAW JSON with claim_category, urgency, policy_applicable, requires_warehouse_lookup, summary. No markdown, no prose. Claim: {safe_claim_message}",
-    }
+    user_prompt = (
+        f"Classify this customer claim into structured categories. "
+        f"Return STRICT JSON ONLY with claim_category, urgency, policy_applicable, "
+        f"requires_warehouse_lookup, and summary. No markdown fences, no prose. "
+        f"Claim: {safe_claim_message}"
+    )
+    
+    # Create canonical prompt hash once, outside the retry loop, for caching
+    system_content = ""
+    canonical_prompt = f"{system_content}|{user_prompt}"
+    prompt_hash = hashlib.sha256(canonical_prompt.encode()).hexdigest()
+    
+    # Check if we have a cached result for this exact prompt before entering the loop
+    if prompt_hash in _llm_response_cache[execution_id]:
+        cached_result = _llm_response_cache[execution_id][prompt_hash]
+        # Create a span for the cached result path
+        with tracer.start_as_current_span("intake_and_classify_span") as span:
+            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
+            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
+            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
+            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
+            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
+            span.set_attribute("input.claim_id", claim.claim_id)
+            span.set_attribute("input.customer_id", claim.customer_id)
+            span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
+            # Apply field projection/compression to cached result
+            cached_result_dict = cached_result.model_dump() if hasattr(cached_result, 'model_dump') else cached_result
+            trimmed_result = _trim_tool_response_payload(cached_result_dict)
+            span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            span.set_attribute("gen_ai.activity.result", json.dumps(trimmed_result))
+            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
+        return cached_result
     
     for attempt in range(1, max_attempts + 1):
-        # Get the prompt for this attempt
-        user_prompt = prompts_by_attempt[attempt]
-        # Create canonical prompt hash using SHA-256 of system + user content, ignoring timestamps
-        # Currently no explicit system prompt, so we use empty string for system content
-        system_content = ""
-        canonical_prompt = f"{system_content}|{user_prompt}"
-        prompt_hash = hashlib.sha256(canonical_prompt.encode()).hexdigest()
-        
-        # Check if we have a cached result for this exact prompt
-        if prompt_hash in _llm_response_cache[execution_id]:
-            cached_result = _llm_response_cache[execution_id][prompt_hash]
-            return cached_result
-
         with tracer.start_as_current_span("intake_and_classify_span") as span:
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
