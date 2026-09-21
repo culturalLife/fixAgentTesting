@@ -175,7 +175,8 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
             span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.agent.name", "InboundTicketClassifierAgent")
+            span.set_attribute("gen_ai.agent.action", "classify_ticket_category")
             span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
             span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
             span.set_attribute("input.claim_id", claim.claim_id)
@@ -224,7 +225,8 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
             span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.agent.name", "InboundTicketClassifierAgent")
+            span.set_attribute("gen_ai.agent.action", "classify_ticket_category")
             span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
             span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
             span.set_attribute("input.claim_id", claim.claim_id)
@@ -243,7 +245,8 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
             span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+            span.set_attribute("gen_ai.agent.name", "InboundTicketClassifierAgent")
+            span.set_attribute("gen_ai.agent.action", "classify_ticket_category")
             span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
             span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
             span.set_attribute("input.claim_id", claim.claim_id)
@@ -263,6 +266,9 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
                     selected_model = "open-mistral-nemo"
                 else:
                     selected_model = "mistral-small-latest"
+                
+                # Set the selected model in the span for observability
+                span.set_attribute("gen_ai.request.model", selected_model)
                 
                 # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
                 res = client.chat.complete(
