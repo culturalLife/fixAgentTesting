@@ -153,7 +153,7 @@ _intake_classification_cache: Dict[str, IntakeClassification] = {}
 )
 async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassification:
     # --- Input validation guard (edge case protection) ---
-    if not claim:
+    if claim is None:
         raise ValueError("claim input must not be None")
     if not getattr(claim, "claim_id", None) or not str(claim.claim_id).strip():
         raise ValueError("claim_id is required and must not be empty")
@@ -201,11 +201,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
     # Retry logic with max_attempts = 3
     max_attempts = 3
     last_exception = None
+    previous_error = None
     
     # Define a single, robust prompt for classification to avoid duplicate LLM calls
     # Use safe prompt creation to prevent large claim messages from dominating the prompt
     safe_claim_message = _trim_string_for_prompt(claim.customer_message, max_chars=MAX_FIELD_LENGTH)
-    user_prompt = (
+    base_user_prompt = (
         f"Classify this customer claim into structured categories. "
         f"Return STRICT JSON ONLY with claim_category, urgency, policy_applicable, "
         f"requires_warehouse_lookup, and summary. No markdown fences, no prose. "
@@ -214,7 +215,7 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
     
     # Create canonical prompt hash once, outside the retry loop, for caching
     system_content = ""
-    canonical_prompt = f"{system_content}|{user_prompt}"
+    canonical_prompt = f"{system_content}|{base_user_prompt}"
     prompt_hash = hashlib.sha256(canonical_prompt.encode()).hexdigest()
     
     # Check if we have a cached result for this exact prompt before entering the loop
@@ -241,6 +242,12 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         return cached_result
     
     for attempt in range(1, max_attempts + 1):
+        # Build corrective prompt prefix based on previous attempt errors
+        if previous_error:
+            user_prompt = f"PREVIOUS ATTEMPT ERROR: {previous_error}\nCORRECTIVE ACTION: Return ONLY valid JSON without markdown fences or prose. {base_user_prompt}"
+        else:
+            user_prompt = base_user_prompt
+        
         with tracer.start_as_current_span("intake_and_classify_span") as span:
             span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
             span.set_attribute("gen_ai.workflow.execution_id", execution_id)
@@ -383,12 +390,17 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
 
             except Exception as exc:
                 record_span_exception(span, exc)
-                span.set_attribute("gen_ai.activity.status", "FAILED")
+                span.set_attribute("gen_ai.activity.status", "RETRYABLE_ERROR")
                 last_exception = exc
+                previous_error = f"{type(exc).__name__}: {str(exc)}"
                 
-                # On final attempt, raise the exception
+                # On final attempt, raise non-retriable error and route to human review
                 if attempt == max_attempts:
-                    raise exc
+                    span.set_attribute("gen_ai.activity.status", "FAILED")
+                    span.set_attribute("status_code", "NON_RETRIABLE_ERROR")
+                    span.set_attribute("agent.handoff.target", "human-review-queue")
+                    error_msg = f"Schema validation failed after {max_attempts} attempts: {previous_error}. Routing to human-review queue."
+                    raise ValueError(error_msg)
                 # Otherwise, continue to next attempt
                 continue
     
