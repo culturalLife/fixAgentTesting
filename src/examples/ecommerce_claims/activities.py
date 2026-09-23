@@ -1,16 +1,12 @@
 from __future__ import annotations
+import asyncio
 import hashlib
 import json
 import os
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 import mistralai.workflows as workflows
 from mistralai.client import Mistral
-
-# Maximum tokens allowed for tool response payloads to prevent prompt domination
-MAX_TOOL_RESPONSE_TOKENS = 2000
-# Maximum length for any single string field in tool responses
-MAX_FIELD_LENGTH = 500
 
 from src.telemetry import (
     get_current_execution_id,
@@ -31,106 +27,6 @@ SERVICE_NAME = "ecommerce-claims-worker"
 WORKFLOW_NAME = "ecommerce-claims-triage-workflow"
 
 
-def _trim_tool_response_payload(data: Any, max_tokens: int = MAX_TOOL_RESPONSE_TOKENS) -> Any:
-    """
-    Trim tool return payloads to prevent them from dominating LLM prompts.
-    For structured data (lists/arrays), return count + sample instead of full dataset.
-    For large strings, truncate with a marker.
-    
-    Args:
-        data: The tool response data to trim
-        max_tokens: Maximum allowed tokens (approximated as chars/4)
-    
-    Returns:
-        Trimmed version of the data
-    """
-    # Estimate tokens by approximating chars / 4
-    def estimate_tokens(text: str) -> int:
-        return len(text) // 4 if text else 0
-    
-    def process_value(value: Any) -> Any:
-        if value is None:
-            return None
-        
-        # If it's a string, truncate if too long
-        if isinstance(value, str):
-            if estimate_tokens(value) > max_tokens:
-                truncated = value[:max_tokens * 4]  # Approximate char count
-                return f"{truncated}[...truncated (full data available)]"
-            return value
-        
-        # If it's a list/array with many items, return count + sample
-        if isinstance(value, list):
-            if len(value) > 10:  # More than 10 items, sample it
-                sample_size = min(5, len(value))
-                return {
-                    "_sample": value[:sample_size],
-                    "_total_count": len(value),
-                    "_truncated": True,
-                    "_message": f"Showing {sample_size} of {len(value)} items. Use specific queries for full data."
-                }
-            # Process each item in the list
-            return [process_value(item) for item in value]
-        
-        # If it's a dict, process each value
-        if isinstance(value, dict):
-            result = {}
-            for k, v in value.items():
-                # Truncate long string values in dict
-                if isinstance(v, str) and len(v) > MAX_FIELD_LENGTH:
-                    result[k] = f"{v[:MAX_FIELD_LENGTH]}...[truncated]"
-                else:
-                    result[k] = process_value(v)
-            return result
-        
-        return value
-    
-    return process_value(data)
-
-
-def _trim_string_for_prompt(text: str, max_chars: int = MAX_FIELD_LENGTH) -> str:
-    """
-    Trim a string to a safe length for inclusion in LLM prompts.
-    
-    Args:
-        text: The string to trim
-        max_chars: Maximum allowed characters
-    
-    Returns:
-        Trimmed string with truncation marker if needed
-    """
-    if not text:
-        return text
-    if len(text) <= max_chars:
-        return text
-    return f"{text[:max_chars]}...[truncated]"
-
-
-def _create_safe_prompt(base_prompt: str, data: Any, data_label: str = "data") -> str:
-    """
-    Create a prompt with safely trimmed data injection.
-    
-    Args:
-        base_prompt: The base prompt template with {data} placeholder
-        data: The data to inject
-        data_label: Label for the data in the prompt
-    
-    Returns:
-        Safe prompt with trimmed data
-    """
-    # Convert data to string
-    if isinstance(data, (dict, list)):
-        data_str = json.dumps(data)
-    else:
-        data_str = str(data)
-    
-    # Trim the data string
-    trimmed_data = _trim_string_for_prompt(data_str, max_chars=MAX_FIELD_LENGTH)
-    
-    # Replace the placeholder
-    return base_prompt.replace(f"{{{data_label}}}", trimmed_data)
-
-
 def _get_mistral_client() -> Mistral:
     api_key = os.getenv("MISTRAL_API_KEY", "")
     server_url = os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL")
@@ -142,18 +38,18 @@ def _get_mistral_client() -> Mistral:
 # ---------------------------------------------------------------------------
 # ACTIVITY 1: Intake & Classification Agent (FAQIntakeAgent)
 # ---------------------------------------------------------------------------
+# Cache for storing classification results by claim_id to avoid redundant API calls
+_intake_classification_cache: Dict[str, IntakeClassification] = {}
 # Per-execution cache for storing LLM responses keyed by canonical prompt hash
 _llm_response_cache: Dict[str, Dict[str, Any]] = {}
-# Per-execution cache for storing intake classification results keyed by claim_id
-_intake_classification_cache: Dict[str, IntakeClassification] = {}
 
 @workflows.activity(
     name="intake_and_classify_claim",
     start_to_close_timeout=timedelta(seconds=45),
 )
-async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassification:
+async def intake_and_classify_claim(claim: Optional[CustomerClaimInput] = None) -> IntakeClassification:
     # --- Input validation guard (edge case protection) ---
-    if claim is None:
+    if not claim:
         raise ValueError("claim input must not be None")
     if not getattr(claim, "claim_id", None) or not str(claim.claim_id).strip():
         raise ValueError("claim_id is required and must not be empty")
@@ -165,249 +61,171 @@ async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassifi
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
     
-    # Check cache first to avoid redundant API calls for the same claim
-    claim_id_str = str(claim.claim_id)
-    if claim_id_str in _intake_classification_cache:
-        cached_result = _intake_classification_cache[claim_id_str]
-        tracer = get_telemetry_tracer_instance(SERVICE_NAME)
-        execution_id = get_current_execution_id()
-        with tracer.start_as_current_span("intake_and_classify_span") as span:
-            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
-            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
-            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "InboundTicketClassifierAgent")
-            span.set_attribute("gen_ai.agent.action", "classify_ticket_category")
-            span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
-            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
-            span.set_attribute("input.claim_id", claim.claim_id)
-            span.set_attribute("input.customer_id", claim.customer_id)
-            span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
-            # Apply field projection/compression to cached result before returning
-            cached_result_dict = cached_result.model_dump() if hasattr(cached_result, 'model_dump') else cached_result
-            trimmed_result = _trim_tool_response_payload(cached_result_dict)
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("gen_ai.activity.result", json.dumps(trimmed_result))
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
-        return cached_result
-    
-    # Initialize per-execution prompt cache if not exists
+    # Get execution_id for per-execution caching
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
+    
+    # Initialize per-execution cache if not present
     if execution_id not in _llm_response_cache:
         _llm_response_cache[execution_id] = {}
     
-    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
+    # Check cache first to avoid redundant API calls for the same claim
+    claim_id_str = str(claim.claim_id)
+    if claim_id_str in _intake_classification_cache:
+        return _intake_classification_cache[claim_id_str]
 
-    # Retry logic with max_attempts = 3
-    max_attempts = 3
-    last_exception = None
-    previous_error = None
-    
-    # Define a single, robust prompt for classification to avoid duplicate LLM calls
-    # Use safe prompt creation to prevent large claim messages from dominating the prompt
-    safe_claim_message = _trim_string_for_prompt(claim.customer_message, max_chars=MAX_FIELD_LENGTH)
-    base_user_prompt = (
-        f"Classify this customer claim into structured categories. "
-        f"Return STRICT JSON ONLY with claim_category, urgency, policy_applicable, "
-        f"requires_warehouse_lookup, and summary. No markdown fences, no prose. "
-        f"Claim: {safe_claim_message}"
+    # Build prompt with system and user content to compute canonical hash
+    system_prompt = "You are an intake specialist for an e-commerce support pipeline."
+    user_prompt = (
+        f"Classify the following customer claim:\n"
+        f"Claim ID: {claim.claim_id}\n"
+        f"Order ID: {claim.order_id}\n"
+        f"Claim Type: {claim.claim_type}\n"
+        f"Amount: ${claim.claim_amount}\n"
+        f"Message: {claim.customer_message}\n\n"
+        f"Return a valid JSON object matching the IntakeClassification schema:\n"
+        f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
+        f"- urgency: low, normal, high, or critical\n"
+        f"- policy_applicable: string name of policy clause\n"
+        f"- requires_warehouse_lookup: boolean\n"
+        f"- summary: concise 1-2 sentence description"
     )
     
-    # Create canonical prompt hash once, outside the retry loop, for caching
-    system_content = ""
-    canonical_prompt = f"{system_content}|{base_user_prompt}"
-    prompt_hash = hashlib.sha256(canonical_prompt.encode()).hexdigest()
+    # Compute canonical prompt hash (SHA-256 of system + user content) for per-execution caching
+    # This ignores timestamps and other dynamic content, focusing on the actual prompt content
+    prompt_hash = hashlib.sha256((system_prompt + user_prompt).encode('utf-8')).hexdigest()
     
-    # Check if we have a cached result for this exact prompt before entering the loop
+    # Check per-execution cache for this prompt hash BEFORE creating span
+    # This prevents duplicate spans for cached results
     if prompt_hash in _llm_response_cache[execution_id]:
         cached_result = _llm_response_cache[execution_id][prompt_hash]
-        # Create a span for the cached result path
-        with tracer.start_as_current_span("intake_and_classify_span") as span:
-            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
-            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
-            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "InboundTicketClassifierAgent")
-            span.set_attribute("gen_ai.agent.action", "classify_ticket_category")
-            span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
-            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
-            span.set_attribute("input.claim_id", claim.claim_id)
-            span.set_attribute("input.customer_id", claim.customer_id)
-            span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
-            # Apply field projection/compression to cached result
-            cached_result_dict = cached_result.model_dump() if hasattr(cached_result, 'model_dump') else cached_result
-            trimmed_result = _trim_tool_response_payload(cached_result_dict)
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("gen_ai.activity.result", json.dumps(trimmed_result))
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
         return cached_result
-    
-    for attempt in range(1, max_attempts + 1):
-        # Build corrective prompt prefix based on previous attempt errors
-        if previous_error:
-            user_prompt = f"PREVIOUS ATTEMPT ERROR: {previous_error}\nCORRECTIVE ACTION: Return ONLY valid JSON without markdown fences or prose. {base_user_prompt}"
-        else:
-            user_prompt = base_user_prompt
-        
-        with tracer.start_as_current_span("intake_and_classify_span") as span:
-            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
-            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
-            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "InboundTicketClassifierAgent")
-            span.set_attribute("gen_ai.agent.action", "classify_ticket_category")
-            span.set_attribute("gen_ai.tool.name", "tool::query_warehouse_database")
-            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
-            span.set_attribute("input.claim_id", claim.claim_id)
-            span.set_attribute("input.customer_id", claim.customer_id)
-            span.set_attribute("wf.activity.attempt", attempt)
-            span.set_attribute("max_tool_response_tokens", MAX_TOOL_RESPONSE_TOKENS)
 
-            try:
-                # Model routing check: estimate input tokens and downgrade if appropriate
-                # For extraction/classification tasks with high input:output ratio and no tool usage, use smaller model
-                input_tokens = len(user_prompt.split())
-                estimated_output_tokens = 50  # Conservative estimate for classification JSON output
-                uses_tools = False  # This is a simple classification task without actual tool calls
-                
-                # If input >> output and no tools used, downgrade to smaller/faster model
-                if input_tokens > 2 * estimated_output_tokens and not uses_tools:
-                    selected_model = "open-mistral-nemo"
-                else:
-                    selected_model = "mistral-small-latest"
-                
-                # Set the selected model in the span for observability
-                span.set_attribute("gen_ai.request.model", selected_model)
-                
-                # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
-                res = client.chat.complete(
-                    model=selected_model,
-                    messages=[{"role": "user", "content": user_prompt}],
-                    response_format={"type": "json_object"},
-                    max_tokens=150,
-                    temperature=0.1,
-                    tools=[
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "extract_structured_claim_data",
-                                "description": "Extract and validate structured claim data using strict bullet JSON schema",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "claim_category": {
-                                            "type": "string",
-                                            "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
-                                            "description": "Category of the claim"
-                                        },
-                                        "urgency": {
-                                            "type": "string",
-                                            "enum": ["low", "normal", "high", "critical"],
-                                            "description": "Urgency level of the claim"
-                                        },
-                                        "policy_applicable": {
-                                            "type": "string",
-                                            "description": "Name of the applicable policy clause"
-                                        },
-                                        "requires_warehouse_lookup": {
-                                            "type": "boolean",
-                                            "description": "Whether warehouse lookup is required"
-                                        },
-                                        "summary": {
-                                            "type": "string",
-                                            "description": "Concise 1-2 sentence description of the claim"
-                                        }
+    client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
+
+    with tracer.start_as_current_span("GeneralLedgerPostingAgent::generate_journal_entry") as span:
+        span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
+        span.set_attribute("gen_ai.workflow.execution_id", execution_id)
+        span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
+        span.set_attribute("gen_ai.agent.name", "GeneralLedgerPostingAgent")
+        span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
+        span.set_attribute("input.claim_id", claim.claim_id)
+        span.set_attribute("input.customer_id", claim.customer_id)
+
+        try:
+            # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
+            res = client.chat.complete(
+                model="mistral-small-latest",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=150,
+                temperature=0.1,
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "extract_structured_claim_data",
+                            "description": "Extract and validate structured claim data using strict bullet JSON schema",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "claim_category": {
+                                        "type": "string",
+                                        "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
+                                        "description": "Category of the claim"
                                     },
-                                    "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
-                                }
+                                    "urgency": {
+                                        "type": "string",
+                                        "enum": ["low", "normal", "high", "critical"],
+                                        "description": "Urgency level of the claim"
+                                    },
+                                    "policy_applicable": {
+                                        "type": "string",
+                                        "description": "Name of the applicable policy clause"
+                                    },
+                                    "requires_warehouse_lookup": {
+                                        "type": "boolean",
+                                        "description": "Whether warehouse lookup is required"
+                                    },
+                                    "summary": {
+                                        "type": "string",
+                                        "description": "Concise 1-2 sentence description of the claim"
+                                    }
+                                },
+                                "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
                             }
                         }
-                    ]
-                )
-                # Handle both regular content and tool call responses with defensive checks
-                message = res.choices[0].message
-                raw_content = None
-                if hasattr(message, 'tool_calls') and message.tool_calls:
-                    # Extract arguments from the tool call
-                    tool_call = message.tool_calls[0]
-                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
-                        raw_content = tool_call.function.arguments
-                        # Trim tool call arguments to prevent prompt domination
-                        if raw_content and len(raw_content) > MAX_FIELD_LENGTH:
-                            raw_content = _trim_string_for_prompt(raw_content, max_chars=MAX_FIELD_LENGTH)
-                if raw_content is None and hasattr(message, 'content'):
-                    # Fallback to regular content
-                    raw_content = message.content
-                    # Trim regular content if it's a tool response
-                    if raw_content and len(raw_content) > MAX_FIELD_LENGTH:
-                        raw_content = _trim_string_for_prompt(raw_content, max_chars=MAX_FIELD_LENGTH)
-                
-                # Ensure raw_content is a string before JSON parsing
-                if not isinstance(raw_content, str):
-                    raw_content = str(raw_content) if raw_content is not None else "{}"
-                
-                try:
-                    parsed = json.loads(raw_content)
-                except (json.JSONDecodeError, TypeError):
-                    # Fallback to empty dict if parsing fails
-                    parsed = {}
+                    }
+                ]
+            )
+            # Handle both regular content and tool call responses with defensive checks
+            message = res.choices[0].message
+            raw_content = None
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                # Extract arguments from the tool call
+                tool_call = message.tool_calls[0]
+                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                    raw_content = tool_call.function.arguments
+            if raw_content is None and hasattr(message, 'content'):
+                # Fallback to regular content
+                raw_content = message.content
+            
+            # Ensure raw_content is a string before JSON parsing
+            if not isinstance(raw_content, str):
+                raw_content = str(raw_content) if raw_content is not None else "{}"
+            
+            # Clean the response by removing markdown fences if present
+            clean_response = raw_content.strip()
+            if clean_response.startswith("```json") or clean_response.startswith("```"):
+                clean_response = clean_response.replace("```json", "").replace("```", "").strip()
+            
+            try:
+                parsed = json.loads(clean_response)
+            except (json.JSONDecodeError, TypeError):
+                # Fallback to empty dict if parsing fails
+                parsed = {}
+            
+            summary_str = parsed.get("summary", "Customer requested resolution.")
+            if isinstance(summary_str, (dict, list)):
+                summary_str = json.dumps(summary_str)
 
-                summary_str = parsed.get("summary", "Customer requested resolution.")
-                if isinstance(summary_str, (dict, list)):
-                    summary_str = json.dumps(summary_str)
+            # Ensure parsed is a dict before accessing keys
+            if not isinstance(parsed, dict):
+                parsed = {}
+            
+            result = IntakeClassification(
+                claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
+                urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
+                policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
+                requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
+                summary=str(summary_str),
+            )
 
-                # Ensure parsed is a dict before accessing keys
-                if not isinstance(parsed, dict):
-                    parsed = {}
-                
-                # Apply field projection/compression to parsed data before creating result
-                # Trim large string fields to prevent prompt domination
-                trimmed_parsed = _trim_tool_response_payload(parsed)
-                
-                result = IntakeClassification(
-                    claim_category=ClaimType(str(trimmed_parsed.get("claim_category", "refund")).lower()),
-                    urgency=UrgencyLevel(str(trimmed_parsed.get("urgency", "normal")).lower()),
-                    policy_applicable=str(trimmed_parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
-                    requires_warehouse_lookup=bool(trimmed_parsed.get("requires_warehouse_lookup", True)),
-                    summary=str(trimmed_parsed.get("summary", summary_str)),
-                )
+            # Cache the result to avoid redundant API calls for the same claim
+            _intake_classification_cache[claim_id_str] = result
+            
+            # Store in per-execution prompt hash cache
+            _llm_response_cache[execution_id][prompt_hash] = result
 
-                # Cache the result using prompt hash to avoid duplicate LLM calls for identical prompts
-                _llm_response_cache[execution_id][prompt_hash] = result
-                # Also cache by claim_id to avoid redundant processing of the same claim
-                _intake_classification_cache[claim_id_str] = result
+            span.set_attribute("gen_ai.activity.status", "SUCCESS")
+            # Safely serialize result to JSON, handling MagicMock objects
+            try:
+                result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
+                span.set_attribute("gen_ai.activity.result", result_json)
+                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
+            except (TypeError, AttributeError):
+                # Fallback if serialization fails
+                span.set_attribute("gen_ai.activity.result", "{}")
+                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
+            return result
 
-                span.set_attribute("gen_ai.activity.status", "SUCCESS")
-                # Apply field projection/compression to result before setting span attributes
-                result_dict = result.model_dump() if hasattr(result, 'model_dump') else result
-                trimmed_result = _trim_tool_response_payload(result_dict)
-                try:
-                    span.set_attribute("gen_ai.activity.result", json.dumps(trimmed_result))
-                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": json.dumps(trimmed_result), "final_results": json.dumps(trimmed_result)}))
-                except (TypeError, AttributeError):
-                    # Fallback if serialization fails
-                    span.set_attribute("gen_ai.activity.result", "{}")
-                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
-                return result
-
-            except Exception as exc:
-                record_span_exception(span, exc)
-                span.set_attribute("gen_ai.activity.status", "RETRYABLE_ERROR")
-                last_exception = exc
-                previous_error = f"{type(exc).__name__}: {str(exc)}"
-                
-                # On final attempt, raise non-retriable error and route to human review
-                if attempt == max_attempts:
-                    span.set_attribute("gen_ai.activity.status", "FAILED")
-                    span.set_attribute("status_code", "NON_RETRIABLE_ERROR")
-                    span.set_attribute("agent.handoff.target", "human-review-queue")
-                    error_msg = f"Schema validation failed after {max_attempts} attempts: {previous_error}. Routing to human-review queue."
-                    raise ValueError(error_msg)
-                # Otherwise, continue to next attempt
-                continue
-    
-    # If we exhausted all attempts without success, raise the last exception
-    if last_exception:
-        raise last_exception
-    raise ValueError("All retry attempts failed without a specific exception")
+        except Exception as exc:
+            record_span_exception(span, exc)
+            span.set_attribute("gen_ai.activity.status", "FAILED")
+            raise exc
 
 
 # ---------------------------------------------------------------------------
