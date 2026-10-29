@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from collections import OrderedDict
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Type
@@ -111,7 +112,67 @@ async def intake_and_classify_claim(claim: Optional[CustomerClaimInput] = None) 
     if claim_amount is None or float(claim_amount) <= 0:
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
-    
+
+    # --- Mandatory state extraction for downstream handoff (CareIntakeAgent -> FulfilmentAgent) ---
+    # The extracted context (order_id, customer_name, issue_description) MUST be captured
+    # here and forwarded in the classification result so downstream agents can retrieve
+    # the order record. Without this, the FulfilmentAgent fails with
+    # "Fulfilment step finished without retrieving an order record".
+    def _extract_order_id(message: str, fallback: Any) -> str:
+        """Extract an order ID from the customer message (e.g. NW-48213), else use the claim field."""
+        if fallback is not None and str(fallback).strip():
+            return str(fallback).strip()
+        if message:
+            match = re.search(r"\b([A-Z]{2,}-\d{3,})\b", str(message))
+            if match:
+                return match.group(1)
+        return ""
+
+    def _extract_customer_name(message: str) -> str:
+        """Extract the customer's sign-off name from the message (e.g. 'Thanks,\nPriya')."""
+        if not message:
+            return ""
+        text = str(message)
+        # Look for a closing salutation followed by a name on the next line.
+        match = re.search(
+            r"(?:thanks|thank you|regards|kind regards|cheers|sincerely|best wishes|best)[^\n]*\n\s*([A-Z][a-zA-Z'\-]*(?:\s+[A-Z][a-zA-Z'\-]*)?)\s*$",
+            text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if match:
+            return match.group(1).strip()
+        # Fallback: last capitalized token on the final non-empty line.
+        lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+        if lines:
+            tokens = lines[-1].replace(",", " ").split()
+            if tokens and tokens[-1][:1].isupper():
+                return tokens[-1].strip(".")
+        return ""
+
+    def _extract_issue_description(message: str, fallback_type: Any) -> str:
+        """Extract a concise issue description from the customer message."""
+        if not message or not str(message).strip():
+            return str(fallback_type) if fallback_type else "Customer claim"
+        text = str(message)
+        # Strip email subject lines, salutations, and sign-offs to get at the core issue.
+        text = re.sub(r"(?im)^subject\s*:.*$", "", text)
+        text = re.sub(r"(?im)^\s*(hi|hello|hey|dear)\b[^\n]*", "", text)
+        text = re.sub(
+            r"(?is)(?:thanks|thank you|regards|kind regards|cheers|sincerely|best wishes|best)[^\n]*\n\s*[A-Z][a-zA-Z'\-]*(?:\s+[A-Z][a-zA-Z'\-]*)?\s*$",
+            "",
+            text,
+        )
+        text = " ".join(text.split())
+        if not text:
+            return str(fallback_type) if fallback_type else "Customer claim"
+        # Cap to a concise description.
+        return text[:500]
+
+    extracted_order_id = _extract_order_id(customer_message, order_id)
+    extracted_customer_name = _extract_customer_name(customer_message)
+    extracted_issue_description = _extract_issue_description(customer_message, claim_type)
+    # --- End mandatory state extraction ---
+
     # Get execution_id for per-execution caching
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
@@ -142,7 +203,9 @@ async def intake_and_classify_claim(claim: Optional[CustomerClaimInput] = None) 
     user_prompt = (
         f"Classify the following customer claim:\n"
         f"Claim ID: {claim_id}\n"
-        f"Order ID: {order_id}\n"
+        f"Order ID: {extracted_order_id}\n"
+        f"Customer Name: {extracted_customer_name or 'Unknown'}\n"
+        f"Issue Description: {extracted_issue_description}\n"
         f"Claim Type: {claim_type}\n"
         f"Amount: ${claim_amount}\n"
         f"Message: {customer_message}\n\n"
@@ -344,6 +407,29 @@ async def intake_and_classify_claim(claim: Optional[CustomerClaimInput] = None) 
                     policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
                     requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
                     summary=str(summary_str),
+                )
+                # Mandatory handoff state: attach the extracted context (order_id,
+                # customer_name, issue_description) to the classification result so it
+                # is preserved and forwarded to downstream agents (e.g. FulfilmentAgent),
+                # which need it to retrieve the order record. Pydantic v2 models reject
+                # unknown fields by default, so set them via object.__setattr__ to keep
+                # them on the instance without altering the shared schema.
+                object.__setattr__(result, "order_id", extracted_order_id)
+                object.__setattr__(result, "customer_name", extracted_customer_name)
+                object.__setattr__(result, "issue_description", extracted_issue_description)
+                # Record the handoff context on the span for traceability.
+                span.set_attribute("handoff.order_id", extracted_order_id)
+                span.set_attribute("handoff.customer_name", extracted_customer_name)
+                span.set_attribute("handoff.issue_description", extracted_issue_description)
+                span.set_attribute("gen_ai.handoff.source_agent", "CareIntakeAgent")
+                span.set_attribute("gen_ai.handoff.target_agent", "FulfilmentAgent")
+                span.set_attribute(
+                    "gen_ai.handoff.payload",
+                    json.dumps({
+                        "order_id": extracted_order_id,
+                        "customer_name": extracted_customer_name,
+                        "issue_description": extracted_issue_description,
+                    }),
                 )
                 
                 # Cache the result to avoid redundant API calls for the same claim.
