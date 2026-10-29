@@ -1,0 +1,52 @@
+[
+  {
+    "scenario": "1_beta_missing_identifier",
+    "execution_id": "beta-agent-81c7fea1",
+    "trace_id": "0c492d3cc9c1167443b47f28344203ab",
+    "conversation_id": "conv_01a181f85c0b71b9ad5e06684b9e34a5",
+    "intake_agent_id": "ag_01a181f85ab572fa97ae8f10428acfbd",
+    "verif_agent_id": "ag_01a181f8590e72e0b7ff21f157551f42",
+    "status": "COMPLETED",
+    "defect_type": "omitted_mandatory_identifier_extraction",
+    "output_summary": "Hello! I'm really sorry to hear that your delivery arrived damaged. I'm here to help you with this issue. Could you plea"
+  },
+  {
+    "scenario": "2_beta_ambiguous_threshold",
+    "execution_id": "beta-agent-c45fb3ea",
+    "trace_id": "774faa88767abbaf421a3a26341f663d",
+    "conversation_id": "conv_01a181f86c2c73d399215825e18349e7",
+    "settle_agent_id": "ag_01a181f8688673748f75aaf2ffca499f",
+    "status": "POLICY_BREACH",
+    "defect_type": "missing_numerical_boundary_threshold",
+    "output_summary": "I'm sorry to hear about the damage to your TV. I've escalated your request for a $4,500.00 refund for the 85-inch 8K Cin"
+  },
+  {
+    "scenario": "3_beta_conflicting_guardrails",
+    "execution_id": "beta-agent-67641bd4",
+    "trace_id": "e2f408cf4c7e85098d0b204f731ebe86",
+    "conversation_id": "conv_01a181f879917289a6a5a0b182f0c3f2",
+    "advocate_agent_id": "ag_01a181f875ea7352b487e8596e737573",
+    "warehouse_agent_id": "ag_01a181f8749b747fb1d5fa3ebb533fe7",
+    "status": "DEADLOCK",
+    "defect_type": "conflicting_inter_agent_guardrails",
+    "output_summary": "REJECTED: Cannot dispatch replacement without return label drop-off confirmation."
+  },
+  {
+    "scenario": "4_beta_stateless_dropped_constraint",
+    "execution_id": "beta-agent-0bbe2233",
+    "trace_id": "10afd5882acecb883e1bdb4fcd86c90d",
+    "payout_agent_id": "ag_01a181f882c872a6a4d8b9539314b352",
+    "status": "FAILED",
+    "defect_type": "dropped_negative_customer_constraint",
+    "output_summary": "ACTION: REFUND_TO_ORIGINAL_CREDIT_CARD"
+  },
+  {
+    "scenario": "5_beta_stateless_unsupported_tool",
+    "execution_id": "beta-agent-1df6a87e",
+    "trace_id": "69de10dace99006f5dc535806069b56d",
+    "wire_agent_id": "ag_01a181f88a0f742a8ef4f89375611268",
+    "status": "FAILED",
+    "defect_type": "hallucinated_unsupported_tool_instruction",
+    "output_summary": "I'm sorry for any inconvenience, but I currently don't have the capability to process reimbursements or access the neces"
+  }
+]

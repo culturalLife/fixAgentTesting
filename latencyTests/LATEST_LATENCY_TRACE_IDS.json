@@ -2,174 +2,225 @@
   {
     "scenario_name": "Cascading Handoff Delay",
     "latency_type": "CASCADING_HANDOFF_DELAY",
-    "execution_id": "lat-cascade-7498fe85",
-    "trace_id": "fe545269c15f80f6935812ace52060d6",
-    "total_duration_ms": 12482.75,
-    "status": "SUCCESS",
-    "step_count": 3,
-    "summary": "Upstream DocumentIngestionAgent caused 3.2s stall, delaying downstream agents.",
+    "execution_id": "lat-cascade-09aa42da",
+    "trace_id": "f6e862ad76c17977cde3c3f9ddbf481a",
+    "total_duration_ms": 9113.56,
+    "status": "FAILED",
+    "step_count": 5,
+    "summary": "Upstream CustomsDocumentParserAgent suffered 3.8s OCR choke, breaching 4200ms ingress SLA and causing DeadlineExceededError at Dossier compilation.",
     "details": {
-      "bottleneck_agent": "DocumentIngestionAgent",
-      "bottleneck_duration_s": 3.2
+      "error": "gRPC StatusCode.DEADLINE_EXCEEDED: Ingress transaction deadline of 4200ms exceeded (elapsed: 9101ms); upstream CustomsDocumentParserAgent OCR rasterization choke starved downstream pipeline.",
+      "bottleneck_agent": "CustomsDocumentParserAgent",
+      "bottleneck_duration_s": 3.8,
+      "downstream_agents_delayed": 4,
+      "sla_limit_ms": 4200
     }
   },
   {
-    "scenario_name": "Ping-Pong Loop Thrash Handoff",
+    "scenario_name": "Ping-Pong Loop Thrash",
     "latency_type": "LOOP_THRASH_HANDOFF",
-    "execution_id": "lat-loop-4f57e780",
-    "trace_id": "13e8be2a9f1a36c507ec2195db7561f4",
-    "total_duration_ms": 17649.76,
-    "status": "SUCCESS",
+    "execution_id": "lat-loop-7a6613f6",
+    "trace_id": "950fc1d7d0e6812509b10aa1ad7cb087",
+    "total_duration_ms": 18903.81,
+    "status": "FAILED",
     "step_count": 8,
-    "summary": "Cyclical handoff thrashing between TriageAgent and PolicyValidationAgent across 4 iterations.",
+    "summary": "ClaimsTriageAgent and MarinePolicyAuditorAgent bounced claim across 8 cyclic handoffs, tripping MaxHandoffHopsExceededError guardrail.",
     "details": {
+      "error": "MaxHandoffHopsExceededError: Cyclic agent handoff thrashing detected (8 round-trip handoffs between ClaimsTriageAgent and MarinePolicyAuditorAgent); exceeded maximum enterprise recursion ceiling of 8 hops.",
       "iterations": 4,
-      "total_handoff_cycles": 8
+      "total_handoff_cycles": 8,
+      "recursion_limit": 8
     }
   },
   {
-    "scenario_name": "Blocking Tool / External I/O Stall",
+    "scenario_name": "Blocking Tool Stall",
     "latency_type": "BLOCKING_TOOL_STALL",
-    "execution_id": "lat-tool-stall-94a36874",
-    "trace_id": "aeddcfaacb71413a64e8a5476bb7a887",
-    "total_duration_ms": 8137.2,
-    "status": "SUCCESS",
+    "execution_id": "lat-tool-stall-ce9ac890",
+    "trace_id": "005f691e0331656473277a838e27950c",
+    "total_duration_ms": 6694.78,
+    "status": "FAILED",
     "step_count": 3,
-    "summary": "LegacyDatabaseAgent blocked for 3.6s on slow tool query_legacy_sap_erp.",
+    "summary": "CoreBankingLedgerAgent stalled for 4.2s on row lock contention, terminating with DatabaseLockTimeoutError.",
     "details": {
-      "slow_tool": "query_legacy_sap_erp",
-      "tool_delay_s": 3.6
+      "error": "HikariCP-CoreLedgerPool: Connection acquisition timed out after 4200ms. Lock wait timeout exceeded on row 'GL_ACCT_EUR_MAIN_001' under SERIALIZABLE isolation; transaction rolled back.",
+      "slow_tool": "execute_atomic_ledger_journal_entry",
+      "tool_delay_s": 4.2,
+      "isolation": "SERIALIZABLE"
     }
   },
   {
     "scenario_name": "Token Bloat & High TTFT Latency",
     "latency_type": "TOKEN_BLOAT_LATENCY",
-    "execution_id": "lat-bloat-9eedcbd9",
-    "trace_id": "92d1a62c50bbf6c57a7c9dcf5fc5bfbb",
-    "total_duration_ms": 5186.27,
-    "status": "SUCCESS",
+    "execution_id": "lat-bloat-e98a26ba",
+    "trace_id": "3aeeeb3ce26b8d6c3fd54eb858e43442",
+    "total_duration_ms": 3170.21,
+    "status": "FAILED",
     "step_count": 2,
-    "summary": "35,400 token context payload caused elevated TTFT (2400ms) and LLM generation drag (2.8s).",
+    "summary": "38,400 token context payload caused elevated TTFT (2800ms) and breached microservice allocation limit (ContextWindowExceededError).",
     "details": {
-      "prompt_tokens": 35400,
-      "ttft_ms": 2400,
-      "llm_processing_s": 2.8
+      "error": "HTTP 413 Payload Too Large: Prompt payload size 38,400 tokens exceeds microservice ingress allocation limit of 16,384 tokens for cluster 'regulatory-nlp-v2'. Context compaction or semantic chunking required.",
+      "prompt_tokens": 38400,
+      "ttft_ms": 2800,
+      "token_limit": 16384
     }
   },
   {
-    "scenario_name": "Fan-out Straggler Bottleneck",
+    "scenario_name": "Fanout Straggler Delay",
     "latency_type": "FANOUT_STRAGGLER_DELAY",
-    "execution_id": "lat-fanout-7d67bf7b",
-    "trace_id": "b4af446185db8fe58e5b3afb52682a74",
-    "total_duration_ms": 6274.43,
-    "status": "SUCCESS",
+    "execution_id": "lat-fanout-e9701e8b",
+    "trace_id": "6007e7419e36baab18ee1ac74440f8bf",
+    "total_duration_ms": 3661.65,
+    "status": "FAILED",
     "step_count": 5,
-    "summary": "Parallel CreditBureauStragglerAgent took 3.9s, gating the entire fan-in aggregation.",
+    "summary": "Parallel fan-out barrier collapsed when CommercialPropertyValuationAgent exceeded 3000ms SLA (AsyncFanoutTimeoutError).",
     "details": {
-      "straggler_agent": "CreditBureauStragglerAgent",
-      "straggler_duration_s": 3.9
+      "error": "AsyncFanoutTimeoutError: Worker 'CommercialPropertyValuationAgent' exceeded barrier sync SLA limit of 3000ms (elapsed: 3500ms) on spatial LiDAR regression. Fan-out synchronization barrier collapsed.",
+      "straggler_agent": "CommercialPropertyValuationAgent",
+      "straggler_duration_s": 3.5,
+      "barrier_sla_s": 3.0
     }
   },
   {
-    "scenario_name": "Retry Storm & Degraded Fallback",
+    "scenario_name": "Retry Storm Backoff",
     "latency_type": "RETRY_STORM_BACKOFF",
-    "execution_id": "lat-retry-f1b13347",
-    "trace_id": "8dde55a7a3cbf768d3171cfdbbfa39fc",
-    "total_duration_ms": 6592.02,
-    "status": "DEGRADED",
+    "execution_id": "lat-retry-facc1101",
+    "trace_id": "9512b8f379e58e83027fa11754809781",
+    "total_duration_ms": 4766.09,
+    "status": "FAILED",
     "step_count": 5,
-    "summary": "3 sequential timeout retries with exponential backoffs caused 5.4s delay before degraded fallback.",
+    "summary": "PaymentProcessingAgent performed 3 retries with escalating backoffs before tripping CircuitBreakerOpenException.",
     "details": {
-      "attempts": 3,
-      "cumulative_backoff_s": 2.4000000000000004
-    }
-  },
-  {
-    "scenario_name": "Clean Optimal Baseline",
-    "latency_type": "CLEAN_OPTIMAL_BASELINE",
-    "execution_id": "lat-clean-f718dcf2",
-    "trace_id": "0bb9d5cd3dc69bee321425539e54554c",
-    "total_duration_ms": 845.99,
-    "status": "SUCCESS",
-    "step_count": 2,
-    "summary": "Optimal reference handoff completed in under 400ms without latency defects.",
-    "details": {
-      "duration_ms": 845.9927000003518
+      "error": "CircuitBreakerOpenException: Downstream circuit for 'SWIFT-US-8819' tripped OPEN after 3 consecutive failures (504 Gateway Timeout, 429 Rate Limit, 503 Unavailable). Escalation budget exhausted; payment rejected to DLQ.",
+      "retry_attempts": 3,
+      "cumulative_backoff_s": 4.2,
+      "circuit_state": "OPEN"
     }
   },
   {
     "scenario_name": "Model Oversizing LLM Delay",
     "latency_type": "MODEL_OVERSIZING_LLM_DELAY",
-    "execution_id": "lat-oversize-00e347f2",
-    "trace_id": "a5ce951d951c695ecf7c72070b43b6ca",
-    "total_duration_ms": 4797.42,
-    "status": "SUCCESS",
+    "execution_id": "lat-oversize-7c8e2d7c",
+    "trace_id": "dc39d04eeaf4cd3fee7d81f30256ef1c",
+    "total_duration_ms": 3802.44,
+    "status": "FAILED",
     "step_count": 2,
-    "summary": "mistral-large used for trivial 2-word boolean classification (3.8s LLM delay).",
+    "summary": "mistral-large-latest requested for 1-token classification timed out in GPU KV-cache queue (InferenceQueueTimeoutError).",
     "details": {
-      "current_model": "mistral-large-latest",
-      "recommended_model": "mistral-small-latest or ministral-8b",
-      "latency_reduction_potential_pct": 75
+      "error": "InferenceQueueTimeoutError: GPU cluster 'vllm-mistral-large' KV-cache allocation queue timeout exceeded (3600ms > 3000ms max_lease). Frontier model requested for 1-token output; worker timed out waiting for available tensor-parallel shard.",
+      "model": "mistral-large-latest",
+      "task_complexity": "LOW",
+      "queue_wait_s": 3.6
     }
   },
   {
     "scenario_name": "Unconstrained Generation Drag",
     "latency_type": "UNCONSTRAINED_GEN_DRAG",
-    "execution_id": "lat-unconstrained-df868d46",
-    "trace_id": "3ec16b2c459ba5dfefc9615d8324316c",
-    "total_duration_ms": 6773.03,
-    "status": "SUCCESS",
-    "step_count": 3,
-    "summary": "Unconstrained 1,420 token generation caused 4.5s generation drag.",
+    "execution_id": "lat-unconstrained-8e668293",
+    "trace_id": "ff1d48f379d835ceabfc9ad9f910a7df",
+    "total_duration_ms": 4418.18,
+    "status": "FAILED",
+    "step_count": 2,
+    "summary": "ComplianceDisclosureAgent generated unbounded 1,460 tokens, breaching ingress proxy timeout (GatewayReadTimeoutError).",
     "details": {
-      "completion_tokens": 1420,
-      "recommended_action": "Set max_tokens=150 and enforce structured Pydantic schema"
+      "error": "GatewayReadTimeoutError: HTTP 504 Envoy reverse proxy stream read timeout after 4200ms. Unconstrained token generation (1,460 tokens without schema bounds) breached upstream ingress gateway deadline.",
+      "completion_tokens": 1460,
+      "generation_duration_s": 4.2,
+      "gateway_timeout_s": 4.0
     }
   },
   {
     "scenario_name": "Sequential I/O Waterfall",
     "latency_type": "SEQUENTIAL_IO_WATERFALL",
-    "execution_id": "lat-waterfall-4bd660fd",
-    "trace_id": "4677a1dfe9f71c0229ab4f32f93e57cd",
-    "total_duration_ms": 4921.3,
-    "status": "SUCCESS",
+    "execution_id": "lat-waterfall-81492a42",
+    "trace_id": "68cfcddc09a02d8a8a97ca37f279802c",
+    "total_duration_ms": 3533.07,
+    "status": "FAILED",
     "step_count": 2,
-    "summary": "4 sequential network calls caused 3.4s I/O delay; parallelization would reduce to ~0.9s.",
+    "summary": "Sequential I/O loop breached global transaction budget of 3000ms (CumulativeTransactionBudgetExceeded).",
     "details": {
-      "sequential_calls": 4,
-      "cumulative_io_s": 3.4,
-      "parallel_potential_s": 0.9,
-      "recommended_action": "Use asyncio.gather() or batch HTTP endpoint"
+      "error": "CumulativeTransactionBudgetExceeded: Synchronous sequential I/O loop breached global transaction budget (3000ms). Terminated at check 4 ('query_credit_scoring_bureau') with cumulative duration 3309ms. Concurrency refactoring required.",
+      "aborted_at_check": 4,
+      "budget_limit_s": 3.0,
+      "recommended_fix": "asyncio.gather()"
     }
   },
   {
     "scenario_name": "Uncached Repeated I/O Lookup",
     "latency_type": "UNCACHED_REPEATED_IO",
-    "execution_id": "lat-uncached-d8d3456b",
-    "trace_id": "9775c461157ffa632b4448dd1aa7c399",
-    "total_duration_ms": 5693.0,
-    "status": "SUCCESS",
-    "step_count": 2,
-    "summary": "Duplicate remote FX queries (2x 1.6s) with identical arguments; caching would eliminate 1.6s.",
+    "execution_id": "lat-uncached-c6a0b229",
+    "trace_id": "146144a825717792105ad2906ffdce45",
+    "total_duration_ms": 4233.44,
+    "status": "FAILED",
+    "step_count": 3,
+    "summary": "fetch_ecb_fx_rates invoked 3 redundant times, triggering upstream HTTP 429 rate limit (UpstreamRateLimitExceeded).",
     "details": {
-      "duplicate_tool": "fetch_live_fx_rates",
-      "cache_savings_potential_s": 1.6,
-      "recommended_action": "Add TTL cache / Redis decorator to fetch_live_fx_rates"
+      "error": "UpstreamRateLimitExceeded: HTTP 429 Too Many Requests from external provider 'api.ecb.europa.eu'. Identical unmemoized query payload repeated 3 times in 4.2s window; upstream provider throttled client IP for 300s.",
+      "duplicate_tool": "fetch_ecb_fx_rates",
+      "call_count": 3,
+      "recommended_cache": "Redis / LRU Cache"
     }
   },
   {
     "scenario_name": "Heavy Vision Payload I/O",
     "latency_type": "HEAVY_VISION_PAYLOAD_IO",
-    "execution_id": "lat-vision-io-f24e9448",
-    "trace_id": "acf42ad637ae1606ca62d356cef29170",
-    "total_duration_ms": 6653.82,
+    "execution_id": "lat-vision-b45f525e",
+    "trace_id": "83fc029e34d9c895c33dcf5564dbb5f2",
+    "total_duration_ms": 3814.21,
+    "status": "FAILED",
+    "step_count": 1,
+    "summary": "DICOMImageIngestionAgent attempted 34.2 MB uncompressed payload transfer, rejected by gRPC transport (ResourceExhaustedError).",
+    "details": {
+      "error": "ResourceExhaustedError: gRPC StatusCode.RESOURCE_EXHAUSTED. Serialized payload size 34.2MB exceeds maximum ingress gRPC message length (16.0MB) on agent handoff transport channel.",
+      "media_size_mb": 34.2,
+      "transfer_duration_s": 3.8,
+      "grpc_limit_mb": 16.0
+    }
+  },
+  {
+    "scenario_name": "Clean Optimal Baseline",
+    "latency_type": "CLEAN_OPTIMAL_BASELINE",
+    "execution_id": "lat-baseline-6e458542",
+    "trace_id": "5fd74bcb85e9f13a8217e2b83efba5ca",
+    "total_duration_ms": 299.83,
     "status": "SUCCESS",
     "step_count": 3,
-    "summary": "25.4MB uncompressed TIFF image transfer caused 4.2s vision I/O latency; downscaling saves ~3.8s.",
+    "summary": "Crisp, efficient 3-agent pipeline completed in < 380ms with 100% cached lookups and zero latency defects.",
     "details": {
-      "raw_size_mb": 25.4,
-      "transfer_delay_s": 4.2,
-      "recommended_action": "Downscale to 1024px WebP to reduce payload by 98%"
+      "wasted_latency_ms": 0,
+      "efficiency_score": 100.0,
+      "status": "OPTIMAL"
+    }
+  },
+  {
+    "scenario_name": "Distributed Lock Timeout",
+    "latency_type": "DISTRIBUTED_LOCK_TIMEOUT",
+    "execution_id": "lat-deadlock-4cfc2131",
+    "trace_id": "165f63255bb8eea1a6a2d89edc265d37",
+    "total_duration_ms": 4921.1,
+    "status": "FAILED",
+    "step_count": 4,
+    "summary": "LondonDeskClearingAgent encountered a 4.2s distributed lock timeout deadlock on USD/JPY settlement ledger, forcing transaction rollback.",
+    "details": {
+      "error": "TwoPhaseCommitDeadlockException: Cross-region 2PC lock deadlock between Tokyo book ('JPY_NOSTRO') and London book ('USD_VOSTRO'). Distributed lock acquisition timed out after 4200ms on resource 'ledger:settlement:usd_jpy'.",
+      "lock_resource": "ledger:settlement:usd_jpy",
+      "lock_wait_s": 4.2,
+      "status": "ROLLED_BACK"
+    }
+  },
+  {
+    "scenario_name": "Exponential Context Explosion",
+    "latency_type": "EXPONENTIAL_CONTEXT_EXPLOSION",
+    "execution_id": "lat-explosion-e2360e85",
+    "trace_id": "d0bb4ab9a26ecf4b81a62bc9df8687bc",
+    "total_duration_ms": 4783.69,
+    "status": "FAILED",
+    "step_count": 4,
+    "summary": "Prompt context exploded to 46,200 uncompacted tokens, crashing worker pod with MemoryAllocationError (OOMKilled).",
+    "details": {
+      "error": "MemoryAllocationError: Worker container OOMKilled (ExitCode 137). Context memory buffer of 46,200 tokens exceeded 32,768 token resident memory ceiling on worker pod 'sec-triage-worker-7b9d'.",
+      "initial_tokens": 2800,
+      "final_prompt_tokens": 46200,
+      "memory_ceiling_tokens": 32768
     }
   }
 ]

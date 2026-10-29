@@ -24,18 +24,28 @@ def setup_telemetry_client(
     Sends OTLP traces to MISTRAL_OTLP_TRACES_ENDPOINT.
     """
     key = api_key or os.getenv("MISTRAL_API_KEY", "")
+    server_url = os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL")
     endpoint = os.getenv(
         "MISTRAL_OTLP_TRACES_ENDPOINT", "https://api.mistral.ai/telemetry/v1/traces"
     )
     os.environ["MISTRAL_OTLP_TRACES_ENDPOINT"] = endpoint
     os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = endpoint
 
-    client = Mistral(api_key=key)
+    if server_url:
+        client = Mistral(api_key=key, server_url=server_url)
+    else:
+        client = Mistral(api_key=key)
 
     try:
         mode = os.getenv("MISTRAL_SDK_TELEMETRY", "dedicated")
         configure_telemetry(client, provider=mode)
         tracer = get_telemetry_tracer(client, name=service_name)
+        
+        # FIX: The `trace` context manager requires the global TracerProvider to be set.
+        from opentelemetry import trace as otel_trace
+        if hasattr(client, "_tracer_provider"):
+            otel_trace.set_tracer_provider(client._tracer_provider)
+            
         logger.info(f"Mistral Observability Telemetry initialized for '{service_name}' on endpoint: {endpoint}")
     except Exception as e:
         logger.warning(f"Failed to configure Mistral SDK telemetry tracer: {e}")
@@ -53,8 +63,6 @@ def get_telemetry_tracer_instance(service_name: str = "workflow-agent-worker") -
         _CLIENT_CACHE = client
         _TRACER_CACHE[service_name] = tracer
     return _TRACER_CACHE[service_name]
-
-
 
 
 def record_span_exception(span: Any, exc: Exception) -> None:

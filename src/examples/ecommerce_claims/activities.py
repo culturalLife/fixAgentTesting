@@ -1,10 +1,15 @@
 from __future__ import annotations
+import asyncio
+import hashlib
 import json
 import os
+from collections import OrderedDict
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 import mistralai.workflows as workflows
 from mistralai.client import Mistral
+from mistralai.extra.observability import trace
+from mistralai.client.errors import MistralError
 
 from src.telemetry import (
     get_current_execution_id,
@@ -36,178 +41,383 @@ def _get_mistral_client() -> Mistral:
 # ---------------------------------------------------------------------------
 # ACTIVITY 1: Intake & Classification Agent (FAQIntakeAgent)
 # ---------------------------------------------------------------------------
-# Cache for storing classification results by claim_id to avoid redundant API calls
-_intake_classification_cache: Dict[str, IntakeClassification] = {}
+# Cache for storing classification results by claim_id to avoid redundant API calls.
+# Bounded sliding-window retention: evicts oldest entries once the window is full so
+# conversation history does not accumulate monotonically across turns.
+_INTAKE_CACHE_MAX_ENTRIES = 256
+_intake_classification_cache: "OrderedDict[str, IntakeClassification]" = OrderedDict()
+# Per-execution cache for storing LLM responses keyed by canonical prompt hash.
+# Bounded sliding-window retention per execution so prompt history stays bounded.
+_LLM_CACHE_MAX_ENTRIES_PER_EXECUTION = 64
+# Bound on the number of per-execution buckets retained so the outer dict does
+# not grow monotonically across sequential turns/executions.
+_LLM_CACHE_MAX_EXECUTIONS = 128
+_llm_response_cache: "OrderedDict[str, OrderedDict[str, Any]]" = OrderedDict()
+
+
+def _prune_intake_cache() -> None:
+    """Evict oldest intake classification entries beyond the sliding-window bound."""
+    while len(_intake_classification_cache) > _INTAKE_CACHE_MAX_ENTRIES:
+        _intake_classification_cache.popitem(last=False)
+
+
+def _prune_llm_cache(execution_id: str) -> None:
+    """Evict oldest LLM response entries for an execution beyond the sliding-window bound.
+
+    The current execution's bucket is never dropped here: the caller (re)creates it
+    before pruning, and dropping an empty bucket would cause a KeyError on the
+    subsequent cache lookup. Instead, the outer per-execution dict is bounded with
+    its own sliding window so accumulated history stays bounded across turns.
+    """
+    cache = _llm_response_cache.get(execution_id)
+    if cache is not None:
+        while len(cache) > _LLM_CACHE_MAX_ENTRIES_PER_EXECUTION:
+            cache.popitem(last=False)
+    # Bound the outer dict with a sliding window (evict oldest executions first).
+    # The current execution is refreshed as most-recent by the caller before this
+    # runs, so it is not evicted by this loop.
+    while len(_llm_response_cache) > _LLM_CACHE_MAX_EXECUTIONS:
+        _llm_response_cache.popitem(last=False)
 
 @workflows.activity(
     name="intake_and_classify_claim",
     start_to_close_timeout=timedelta(seconds=45),
+    retry_policy_max_attempts=3,
 )
-async def intake_and_classify_claim(claim: CustomerClaimInput) -> IntakeClassification:
+async def intake_and_classify_claim(claim: Optional[CustomerClaimInput] = None) -> IntakeClassification:
     # --- Input validation guard (edge case protection) ---
     if not claim:
         raise ValueError("claim input must not be None")
-    if not getattr(claim, "claim_id", None) or not str(claim.claim_id).strip():
+    
+    # Handle both CustomerClaimInput objects and dict-like objects
+    def get_field(obj, field_name, default=None):
+        if isinstance(obj, dict):
+            return obj.get(field_name, default)
+        return getattr(obj, field_name, default)
+    
+    claim_id = get_field(claim, "claim_id")
+    customer_id = get_field(claim, "customer_id")
+    customer_message = get_field(claim, "customer_message")
+    claim_amount = get_field(claim, "claim_amount")
+    order_id = get_field(claim, "order_id")
+    claim_type = get_field(claim, "claim_type")
+    
+    if not claim_id or not str(claim_id).strip():
         raise ValueError("claim_id is required and must not be empty")
-    if not getattr(claim, "customer_id", None) or not str(claim.customer_id).strip():
+    if not customer_id or not str(customer_id).strip():
         raise ValueError("customer_id is required and must not be empty")
-    if not getattr(claim, "customer_message", None) or not str(claim.customer_message).strip():
+    if not customer_message or not str(customer_message).strip():
         raise ValueError("customer_message is required and must not be empty")
-    if getattr(claim, "claim_amount", None) is None or float(claim.claim_amount) <= 0:
+    if claim_amount is None or float(claim_amount) <= 0:
         raise ValueError("claim_amount must be a positive number greater than 0")
     # --- End validation guard ---
     
-    # Check cache first to avoid redundant API calls for the same claim
-    claim_id_str = str(claim.claim_id)
-    if claim_id_str in _intake_classification_cache:
-        cached_result = _intake_classification_cache[claim_id_str]
-        tracer = get_telemetry_tracer_instance(SERVICE_NAME)
-        execution_id = get_current_execution_id()
-        with tracer.start_as_current_span("intake_and_classify_span") as span:
-            span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
-            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
-            span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-            span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
-            span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
-            span.set_attribute("input.claim_id", claim.claim_id)
-            span.set_attribute("input.customer_id", claim.customer_id)
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            span.set_attribute("gen_ai.activity.result", cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result))
-            span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result), "final_results": cached_result.model_dump_json() if hasattr(cached_result, 'model_dump_json') else str(cached_result)}))
-        return cached_result
-    
+    # Get execution_id for per-execution caching
     tracer = get_telemetry_tracer_instance(SERVICE_NAME)
     execution_id = get_current_execution_id()
+    
+    # Initialize per-execution cache if not present (OrderedDict for sliding-window eviction)
+    if execution_id not in _llm_response_cache:
+        _llm_response_cache[execution_id] = OrderedDict()
+    # Mark this execution as most-recent before pruning so the sliding window
+    # never evicts the bucket we are about to read from.
+    _llm_response_cache.move_to_end(execution_id)
+    # Prune stale history so caches stay bounded across sequential turns
+    _prune_intake_cache()
+    _prune_llm_cache(execution_id)
+    # Defensive: ensure the bucket still exists after pruning (it must, since we
+    # just refreshed it as most-recent, but guard against any future eviction bug).
+    if execution_id not in _llm_response_cache:
+        _llm_response_cache[execution_id] = OrderedDict()
+
+    # Check cache first to avoid redundant API calls for the same claim
+    claim_id_str = str(claim_id)
+    if claim_id_str in _intake_classification_cache:
+        # Refresh recency: move to end of the sliding window
+        _intake_classification_cache.move_to_end(claim_id_str)
+        return _intake_classification_cache[claim_id_str]
+
+    # Build prompt with system and user content to compute canonical hash
+    system_prompt = "You are an intake specialist for an e-commerce support pipeline."
+    user_prompt = (
+        f"Classify the following customer claim:\n"
+        f"Claim ID: {claim_id}\n"
+        f"Order ID: {order_id}\n"
+        f"Claim Type: {claim_type}\n"
+        f"Amount: ${claim_amount}\n"
+        f"Message: {customer_message}\n\n"
+        f"Return a valid JSON object matching the IntakeClassification schema:\n"
+        f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
+        f"- urgency: low, normal, high, or critical\n"
+        f"- policy_applicable: string name of policy clause\n"
+        f"- requires_warehouse_lookup: boolean\n"
+        f"- summary: concise 1-2 sentence description"
+    )
+    
+    # Compute canonical prompt hash (SHA-256 of system + user content) for per-execution caching
+    # This ignores timestamps and retry-specific modifications, focusing on the actual claim content
+    canonical_prompt_hash = hashlib.sha256((system_prompt + user_prompt).encode('utf-8')).hexdigest()
+
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
-    with tracer.start_as_current_span("intake_and_classify_span") as span:
+    max_attempts = 3
+    previous_missing_fields = None
+    
+    with trace("wf_vendor_invoice_reconciliation") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
         span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         span.set_attribute("gen_ai.activity.name", "intake_and_classify_claim")
-        span.set_attribute("gen_ai.agent.name", "FAQIntakeAgent")
+        span.set_attribute("gen_ai.agent.name", "GeneralLedgerPostingAgent")
         span.set_attribute("gen_ai.workflow.description", "Intake and classify customer claim into structured categories and determine downstream routing.")
-        span.set_attribute("input.claim_id", claim.claim_id)
-        span.set_attribute("input.customer_id", claim.customer_id)
-
-        try:
-            prompt = (
-                f"You are an intake specialist for an e-commerce support pipeline.\n"
-                f"Classify the following customer claim:\n"
-                f"Claim ID: {claim.claim_id}\n"
-                f"Order ID: {claim.order_id}\n"
-                f"Claim Type: {claim.claim_type}\n"
-                f"Amount: ${claim.claim_amount}\n"
-                f"Message: {claim.customer_message}\n\n"
-                f"Return a valid JSON object matching the IntakeClassification schema:\n"
-                f"- claim_category: refund, replacement, inspection, or fraud_suspect\n"
-                f"- urgency: low, normal, high, or critical\n"
-                f"- policy_applicable: string name of policy clause\n"
-                f"- requires_warehouse_lookup: boolean\n"
-                f"- summary: concise 1-2 sentence description"
-            )
-
-            # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
-            res = client.chat.complete(
-                model="mistral-small-latest",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=150,
-                temperature=0.1,
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "extract_structured_claim_data",
-                            "description": "Extract and validate structured claim data using strict bullet JSON schema",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "claim_category": {
-                                        "type": "string",
-                                        "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
-                                        "description": "Category of the claim"
+        span.set_attribute("input.claim_id", claim_id)
+        span.set_attribute("input.customer_id", customer_id)
+        span.set_attribute("retry.max_attempts", max_attempts)
+        
+        for attempt in range(1, max_attempts + 1):
+            span.set_attribute("retry.attempt", attempt)
+            
+            try:
+                # Add corrective prompt prefix on retries
+                current_system_prompt = system_prompt
+                if attempt > 1 and previous_missing_fields:
+                    missing_fields_str = str(previous_missing_fields)
+                    current_system_prompt = (
+                        f"You are an intake specialist for an e-commerce support pipeline. "
+                        f"Previous attempt {attempt - 1} returned incomplete data with missing fields: {missing_fields_str}. "
+                        f"Please ensure you return a VALID JSON object with ALL required fields: "
+                        f"claim_category (refund/replacement/inspection/fraud_suspect), "
+                        f"urgency (low/normal/high/critical), policy_applicable (string), "
+                        f"requires_warehouse_lookup (boolean), summary (string). "
+                        f"Do NOT wrap the response in markdown fences. "
+                        f"CRITICAL: requires_warehouse_lookup must be true or false (boolean), not null or missing."
+                    )
+                
+                # Check per-execution cache using canonical prompt hash to avoid duplicate LLM calls
+                # The canonical hash is computed from the original prompts, ignoring retry modifications
+                exec_cache = _llm_response_cache.get(execution_id)
+                if exec_cache is None:
+                    # Bucket was evicted between turns; recreate it defensively.
+                    exec_cache = OrderedDict()
+                    _llm_response_cache[execution_id] = exec_cache
+                if canonical_prompt_hash in exec_cache:
+                    cached_result = exec_cache[canonical_prompt_hash]
+                    # Refresh recency within the sliding window
+                    exec_cache.move_to_end(canonical_prompt_hash)
+                    span.set_attribute("gen_ai.activity.status", "CACHED")
+                    span.set_attribute("cache.hit", True)
+                    return cached_result
+                
+                # FAQIntakeAgent tool configuration with strict JSON schema, max_tokens=150, temperature=0.1
+                res = client.chat.complete(
+                    model="mistral-small-latest",
+                    messages=[
+                        {"role": "system", "content": current_system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    max_tokens=150,
+                    temperature=0.1,
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "extract_structured_claim_data",
+                                "description": "Extract and validate structured claim data using strict bullet JSON schema",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "claim_category": {
+                                            "type": "string",
+                                            "enum": ["refund", "replacement", "inspection", "fraud_suspect"],
+                                            "description": "Category of the claim"
+                                        },
+                                        "urgency": {
+                                            "type": "string",
+                                            "enum": ["low", "normal", "high", "critical"],
+                                            "description": "Urgency level of the claim"
+                                        },
+                                        "policy_applicable": {
+                                            "type": "string",
+                                            "description": "Name of the applicable policy clause"
+                                        },
+                                        "requires_warehouse_lookup": {
+                                            "type": "boolean",
+                                            "description": "Whether warehouse lookup is required"
+                                        },
+                                        "summary": {
+                                            "type": "string",
+                                            "description": "Concise 1-2 sentence description of the claim"
+                                        }
                                     },
-                                    "urgency": {
-                                        "type": "string",
-                                        "enum": ["low", "normal", "high", "critical"],
-                                        "description": "Urgency level of the claim"
-                                    },
-                                    "policy_applicable": {
-                                        "type": "string",
-                                        "description": "Name of the applicable policy clause"
-                                    },
-                                    "requires_warehouse_lookup": {
-                                        "type": "boolean",
-                                        "description": "Whether warehouse lookup is required"
-                                    },
-                                    "summary": {
-                                        "type": "string",
-                                        "description": "Concise 1-2 sentence description of the claim"
-                                    }
-                                },
-                                "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
+                                    "required": ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
+                                }
                             }
                         }
-                    }
-                ]
-            )
-            # Handle both regular content and tool call responses with defensive checks
-            message = res.choices[0].message
-            raw_content = None
-            if hasattr(message, 'tool_calls') and message.tool_calls:
-                # Extract arguments from the tool call
-                tool_call = message.tool_calls[0]
-                if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
-                    raw_content = tool_call.function.arguments
-            if raw_content is None and hasattr(message, 'content'):
-                # Fallback to regular content
-                raw_content = message.content
+                    ]
+                )
+                # Handle both regular content and tool call responses with defensive checks
+                message = res.choices[0].message
+                raw_content = None
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    # Extract arguments from the tool call
+                    tool_call = message.tool_calls[0]
+                    if hasattr(tool_call, 'function') and hasattr(tool_call.function, 'arguments'):
+                        raw_content = tool_call.function.arguments
+                if raw_content is None and hasattr(message, 'content'):
+                    # Fallback to regular content
+                    raw_content = message.content
+                
+                # Ensure raw_content is a string before JSON parsing
+                if not isinstance(raw_content, str):
+                    raw_content = str(raw_content) if raw_content is not None else "{}"
+                
+                # Clean the response by removing markdown fences if present
+                clean_response = raw_content.strip()
+                if clean_response.startswith("```json") or clean_response.startswith("```"):
+                    clean_response = clean_response.replace("```json", "").replace("```", "").strip()
+                
+                try:
+                    parsed = json.loads(clean_response)
+                except (json.JSONDecodeError, TypeError):
+                    # Fallback to empty dict if parsing fails
+                    parsed = {}
+                
+                summary_str = parsed.get("summary", "Customer requested resolution.")
+                if isinstance(summary_str, (dict, list)):
+                    summary_str = json.dumps(summary_str)
+                
+                # Ensure parsed is a dict before accessing keys
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                
+                # Validate that all required fields are present
+                required_fields = ["claim_category", "urgency", "policy_applicable", "requires_warehouse_lookup", "summary"]
+                missing_fields = []
+                for f in required_fields:
+                    if f not in parsed:
+                        missing_fields.append(f)
+                    elif f == "requires_warehouse_lookup":
+                        # Boolean field - only None is missing, False is valid
+                        if parsed.get(f) is None:
+                            missing_fields.append(f)
+                    else:
+                        # String fields - empty strings or None are missing
+                        value = parsed.get(f)
+                        if value is None or (isinstance(value, str) and not value.strip()):
+                            missing_fields.append(f)
+                
+                if missing_fields:
+                    # Store missing fields for corrective prompt on next retry
+                    previous_missing_fields = missing_fields
+                    span.set_attribute("gen_ai.activity.status", "PARTIAL")
+                    span.set_attribute("error.missing_fields", str(missing_fields))
+                    
+                    # If we have a completely empty response (all fields missing), retry with corrective prompt
+                    # Otherwise, use defaults for missing fields and continue
+                    if len(missing_fields) == len(required_fields):
+                        # Completely empty response - retry with corrective prompt
+                        if attempt < max_attempts:
+                            continue
+                        else:
+                            # Final attempt failed - route to human review
+                            span.set_attribute("gen_ai.activity.status", "HUMAN_REVIEW")
+                            span.set_attribute("error.message", f"Missing required fields after {max_attempts} attempts: {missing_fields}")
+                            raise ValueError(f"Missing required fields after {max_attempts} attempts: {missing_fields}. Routed to human review queue.")
+                    else:
+                        # Partial response - use defaults for missing fields and continue without retry
+                        # This handles cases where LLM returns some but not all fields
+                        for f in missing_fields:
+                            if f == "claim_category":
+                                parsed[f] = "refund"
+                            elif f == "urgency":
+                                parsed[f] = "normal"
+                            elif f == "policy_applicable":
+                                parsed[f] = "Standard Return Policy 30-Day"
+                            elif f == "requires_warehouse_lookup":
+                                parsed[f] = True
+                            elif f == "summary":
+                                parsed[f] = "Customer requested resolution."
+                
+                result = IntakeClassification(
+                    claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
+                    urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
+                    policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
+                    requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
+                    summary=str(summary_str),
+                )
+                
+                # Cache the result to avoid redundant API calls for the same claim.
+                # Re-insert to mark as most-recent, then prune to enforce the sliding window.
+                _intake_classification_cache.pop(claim_id_str, None)
+                _intake_classification_cache[claim_id_str] = result
+                _prune_intake_cache()
+
+                # Store in per-execution canonical prompt hash cache, then prune to bound growth
+                exec_cache = _llm_response_cache.get(execution_id)
+                if exec_cache is None:
+                    exec_cache = OrderedDict()
+                    _llm_response_cache[execution_id] = exec_cache
+                exec_cache.pop(canonical_prompt_hash, None)
+                exec_cache[canonical_prompt_hash] = result
+                # Refresh this execution as most-recent before pruning the outer window.
+                _llm_response_cache.move_to_end(execution_id)
+                _prune_llm_cache(execution_id)
+                
+                span.set_attribute("gen_ai.activity.status", "SUCCESS")
+                # Safely serialize result to JSON, handling MagicMock objects
+                try:
+                    result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
+                    span.set_attribute("gen_ai.activity.result", result_json)
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
+                except (TypeError, AttributeError):
+                    # Fallback if serialization fails
+                    span.set_attribute("gen_ai.activity.result", "{}")
+                    span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
+                return result
             
-            # Ensure raw_content is a string before JSON parsing
-            if not isinstance(raw_content, str):
-                raw_content = str(raw_content) if raw_content is not None else "{}"
-            
-            try:
-                parsed = json.loads(raw_content)
-            except (json.JSONDecodeError, TypeError):
-                # Fallback to empty dict if parsing fails
-                parsed = {}
+            except Exception as exc:
+                record_span_exception(span, exc)
+                span.set_attribute("gen_ai.activity.status", "FAILED")
+                span.set_attribute("retry.attempt_failed", attempt)
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_attribute("error.message", str(exc))
+                
+                # Classify errors: deterministic (schema/validation) vs recoverable (network/timeout)
+                is_recoverable = False
+                if isinstance(exc, (MistralError, asyncio.TimeoutError)):
+                    # Network/timeout errors - recoverable
+                    is_recoverable = True
+                    span.set_attribute("error.category", "recoverable")
+                elif isinstance(exc, (json.JSONDecodeError, ValueError, KeyError, TypeError)):
+                    # Schema/validation errors - deterministic, fail fast
+                    is_recoverable = False
+                    span.set_attribute("error.category", "deterministic")
+                else:
+                    # Unknown errors - treat as recoverable for safety
+                    is_recoverable = True
+                    span.set_attribute("error.category", "unknown")
+                
+                if not is_recoverable:
+                    # Deterministic error - fail fast without retry
+                    span.set_attribute("gen_ai.activity.status", "FAILED")
+                    span.set_attribute("gen_ai.activity.error_category", "DETERMINISTIC")
+                    span.set_attribute("error.message", f"Deterministic error: {type(exc).__name__}: {str(exc)}")
+                    raise ValueError(f"Deterministic error in wf_vendor_invoice_reconciliation: {type(exc).__name__}: {str(exc)}. Failing fast.")
+                
+                # Recoverable error - apply exponential backoff
+                if attempt < max_attempts:
+                    # Exponential backoff: 1s for attempt 1, 2s for attempt 2
+                    backoff_seconds = min(2 ** (attempt - 1), 2)  # Cap at 2 seconds
+                    span.set_attribute("retry.backoff_seconds", backoff_seconds)
+                    await asyncio.sleep(backoff_seconds)
+                    continue
+                else:
+                    # Final attempt failed - route to human review
+                    span.set_attribute("gen_ai.activity.status", "FAILED")
+                    span.set_attribute("gen_ai.activity.error_category", "HUMAN_REVIEW")
+                    span.set_attribute("error.message", f"Failed after {max_attempts} attempts: {type(exc).__name__}: {str(exc)}")
+                    raise ValueError(f"Failed after {max_attempts} attempts: {type(exc).__name__}: {str(exc)}. Routed to human review queue.")
 
-            summary_str = parsed.get("summary", "Customer requested resolution.")
-            if isinstance(summary_str, (dict, list)):
-                summary_str = json.dumps(summary_str)
-
-            # Ensure parsed is a dict before accessing keys
-            if not isinstance(parsed, dict):
-                parsed = {}
-            
-            result = IntakeClassification(
-                claim_category=ClaimType(str(parsed.get("claim_category", "refund")).lower()),
-                urgency=UrgencyLevel(str(parsed.get("urgency", "normal")).lower()),
-                policy_applicable=str(parsed.get("policy_applicable", "Standard Return Policy 30-Day")),
-                requires_warehouse_lookup=bool(parsed.get("requires_warehouse_lookup", True)),
-                summary=str(summary_str),
-            )
-
-            # Cache the result to avoid redundant API calls for the same claim
-            _intake_classification_cache[claim_id_str] = result
-
-            span.set_attribute("gen_ai.activity.status", "SUCCESS")
-            # Safely serialize result to JSON, handling MagicMock objects
-            try:
-                result_json = result.model_dump_json() if hasattr(result, 'model_dump_json') else str(result)
-                span.set_attribute("gen_ai.activity.result", result_json)
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": result_json, "final_results": result_json}))
-            except (TypeError, AttributeError):
-                # Fallback if serialization fails
-                span.set_attribute("gen_ai.activity.result", "{}")
-                span.set_attribute("gen_ai.activity.state", json.dumps({"result_summary": "{}", "final_results": "{}"}))
-            return result
-
-        except Exception as exc:
-            record_span_exception(span, exc)
-            span.set_attribute("gen_ai.activity.status", "FAILED")
-            raise exc
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +432,7 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
     execution_id = get_current_execution_id()
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
-    with tracer.start_as_current_span("verify_tools_dispatch_span") as span:
+    with trace("verify_tools_dispatch_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
         span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         span.set_attribute("gen_ai.activity.name", "verify_order_and_inventory_tools")
@@ -233,7 +443,7 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
 
         try:
             # 1. Tool Call: lookup_order_details
-            with tracer.start_as_current_span("tool_lookup_order_details") as tool_span:
+            with trace("tool_lookup_order_details") as tool_span:
                 tool_args = {"order_id": claim.order_id, "customer_id": claim.customer_id}
                 tool_span.set_attribute("gen_ai.tool.name", "lookup_order_details")
                 tool_span.set_attribute("gen_ai.tool.call.arguments", json.dumps(tool_args))
@@ -257,7 +467,7 @@ async def verify_order_and_inventory_tools(claim: CustomerClaimInput, classifica
 
             # 2. Tool Call: check_inventory_replacement (if replacement required)
             if classification.requires_warehouse_lookup:
-                with tracer.start_as_current_span("tool_check_warehouse_inventory") as tool_span:
+                with trace("tool_check_warehouse_inventory") as tool_span:
                     inv_args = {"sku": "SKU-9920", "warehouse_id": "WH-EAST-01"}
                     tool_span.set_attribute("gen_ai.tool.name", "check_warehouse_inventory")
                     tool_span.set_attribute("gen_ai.tool.call.arguments", json.dumps(inv_args))
@@ -299,7 +509,7 @@ async def evaluate_compliance_and_policy(
     execution_id = get_current_execution_id()
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
-    with tracer.start_as_current_span("compliance_reasoning_span") as span:
+    with trace("compliance_reasoning_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
         span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         span.set_attribute("gen_ai.activity.name", "evaluate_compliance_and_policy")
@@ -375,7 +585,7 @@ async def generate_customer_resolution(
     execution_id = get_current_execution_id()
     client = Mistral(api_key=os.getenv("MISTRAL_API_KEY", ""), server_url=os.getenv("MISTRAL_BASE_URL") or os.getenv("SERVER_URL"))
 
-    with tracer.start_as_current_span("customer_resolution_span") as span:
+    with trace("customer_resolution_span") as span:
         span.set_attribute("gen_ai.workflow.name", WORKFLOW_NAME)
         span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         span.set_attribute("gen_ai.activity.name", "generate_customer_resolution")

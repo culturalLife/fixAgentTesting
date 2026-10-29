@@ -56,6 +56,8 @@ from agent_handoff_scenarios import (
     run_sequential_io_waterfall_scenario,
     run_uncached_repeated_io_scenario,
     run_heavy_vision_payload_scenario,
+    run_distributed_lock_timeout_scenario,
+    run_context_explosion_scenario,
     ScenarioResult,
 )
 
@@ -76,7 +78,10 @@ SCENARIOS_MAP = {
     "uncached": ("Uncached Repeated I/O Lookup", run_uncached_repeated_io_scenario),
     "vision_io": ("Heavy Vision Payload I/O", run_heavy_vision_payload_scenario),
     "baseline": ("Clean Optimal Baseline", run_clean_baseline_scenario),
+    "deadlock": ("Distributed Lock Timeout", run_distributed_lock_timeout_scenario),
+    "explosion": ("Exponential Context Explosion", run_context_explosion_scenario),
 }
+
 
 
 async def main():
@@ -182,13 +187,13 @@ async def main():
     print(f"\n>> Saved/Updated trace manifest to: {manifest_path}\n")
 
     # Display comparison table
-    print("=" * 110)
-    print(f"{'#':<3} | {'Scenario Name':<32} | {'Latency Type':<26} | {'Duration':<10} | {'Trace ID':<32}")
-    print("-" * 110)
+    print("=" * 120)
+    print(f"{'#':<3} | {'Scenario Name':<30} | {'Latency Type':<26} | {'Status':<8} | {'Duration':<10} | {'Trace ID':<32}")
+    print("-" * 120)
     for idx, r in enumerate(results, start=1):
         dur_str = f"{r.total_duration_ms/1000:.2f}s"
-        print(f"{idx:<3} | {r.scenario_name:<32} | {r.latency_type:<26} | {dur_str:<10} | {r.trace_id:<32}")
-    print("=" * 110 + "\n")
+        print(f"{idx:<3} | {r.scenario_name:<30} | {r.latency_type:<26} | {r.status:<8} | {dur_str:<10} | {r.trace_id:<32}")
+    print("=" * 120 + "\n")
 
 
 if __name__ == "__main__":

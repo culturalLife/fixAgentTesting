@@ -102,6 +102,7 @@ def record_span_error(span: Span, exc: Exception) -> None:
         span.set_attribute("exception.type", exc.__class__.__name__)
         span.set_attribute("exception.message", str(exc))
         span.set_attribute("gen_ai.activity.status", "FAILED")
+        span.set_attribute("status_code", "Error")
     except Exception as err:
         logger.warning(f"Failed to record exception on span: {err}")
 
@@ -112,6 +113,7 @@ def handoff_span(
     agent_name: str,
     action_name: str,
     execution_id: str,
+    workflow_name: Optional[str] = None,
     handoff_from: Optional[str] = None,
     handoff_to: Optional[str] = None,
     handoff_reason: Optional[str] = None,
@@ -124,12 +126,17 @@ def handoff_span(
     """
     span_name = f"agent_{agent_name.lower()}_{action_name}"
     with tracer.start_as_current_span(span_name) as span:
+        span.set_attribute("gen_ai.operation.name", "invoke_agent")
         span.set_attribute("gen_ai.agent.name", agent_name)
+        span.set_attribute("agent_name", agent_name)
         span.set_attribute("gen_ai.activity.name", action_name)
         span.set_attribute("gen_ai.workflow.execution_id", execution_id)
         span.set_attribute("gen_ai.conversation.id", execution_id)
         span.set_attribute("gen_ai.activity.status", "SUCCESS")
+        span.set_attribute("status_code", "Ok")
 
+        if workflow_name:
+            span.set_attribute("gen_ai.workflow.name", workflow_name)
         if handoff_from:
             span.set_attribute("gen_ai.agent.handoff.from", handoff_from)
         if handoff_to:
@@ -144,6 +151,29 @@ def handoff_span(
                 val_str = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
                 span.set_attribute(f"agent.metadata.{k}", val_str)
 
+        def set_token_usage(
+            input_tokens: Optional[int] = None,
+            output_tokens: Optional[int] = None,
+            cache_read_tokens: Optional[int] = None,
+            cache_creation_tokens: Optional[int] = None,
+        ):
+            if input_tokens is not None:
+                span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
+                span.set_attribute("usage_input_tokens", input_tokens)
+                span.set_attribute("prompt_tokens", input_tokens)
+            if output_tokens is not None:
+                span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
+                span.set_attribute("usage_output_tokens", output_tokens)
+                span.set_attribute("completion_tokens", output_tokens)
+            if cache_read_tokens is not None:
+                span.set_attribute("gen_ai.usage.cache_read_input_tokens", cache_read_tokens)
+                span.set_attribute("usage_cache_read_input_tokens", cache_read_tokens)
+            if cache_creation_tokens is not None:
+                span.set_attribute("gen_ai.usage.cache_creation_input_tokens", cache_creation_tokens)
+                span.set_attribute("usage_cache_creation_input_tokens", cache_creation_tokens)
+
+        span.set_token_usage = set_token_usage
+
         try:
             yield span
         except Exception as exc:
@@ -157,6 +187,7 @@ def tool_span(
     tool_name: str,
     arguments: Optional[Dict[str, Any]] = None,
     latency_type: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ):
     """
     Context manager for instrumenting tool / external I/O execution as child spans.
@@ -165,14 +196,24 @@ def tool_span(
     with tracer.start_as_current_span(span_name) as span:
         span.set_attribute("gen_ai.operation.name", "execute_tool")
         span.set_attribute("gen_ai.tool.name", tool_name)
+        span.set_attribute("tool_name", tool_name)
+        span.set_attribute("gen_ai.activity.status", "SUCCESS")
+        span.set_attribute("status_code", "Ok")
+        if execution_id:
+            span.set_attribute("gen_ai.workflow.execution_id", execution_id)
+            span.set_attribute("gen_ai.conversation.id", execution_id)
         if latency_type:
             span.set_attribute("gen_ai.latency.type", latency_type)
         if arguments:
-            span.set_attribute("gen_ai.tool.call.arguments", json.dumps(arguments))
+            arg_str = json.dumps(arguments)
+            span.set_attribute("gen_ai.tool.call.arguments", arg_str)
+            span.set_attribute("tool_arguments", arg_str)
 
         def set_result(result_val: Any):
             res_str = json.dumps(result_val) if isinstance(result_val, (dict, list)) else str(result_val)
             span.set_attribute("gen_ai.tool.result", res_str)
+            span.set_attribute("gen_ai.tool.call.result", res_str)
+            span.set_attribute("tool_call_result", res_str)
             span.set_attribute("gen_ai.activity.status", "SUCCESS")
 
         try:
@@ -180,3 +221,4 @@ def tool_span(
         except Exception as exc:
             record_span_error(span, exc)
             raise exc
+

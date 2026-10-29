@@ -157,8 +157,7 @@ async def main():
         except Exception:
             existing_manifest = []
 
-    existing_trace_ids = {entry.get("trace_id") for entry in existing_manifest if isinstance(entry, dict)}
-    new_entries = []
+    merged_dict = {m.get("scenario_name", f"entry_{i}"): m for i, m in enumerate(existing_manifest) if isinstance(m, dict)}
     for r in results:
         entry = {
             "scenario_name": r.scenario_name,
@@ -172,16 +171,9 @@ async def main():
             "summary": r.summary,
             "details": r.details,
         }
-        if r.trace_id not in existing_trace_ids:
-            new_entries.append(entry)
-        else:
-            # Update existing entry with latest run details
-            for idx, existing_entry in enumerate(existing_manifest):
-                if existing_entry.get("trace_id") == r.trace_id:
-                    existing_manifest[idx] = entry
-                    break
+        merged_dict[r.scenario_name] = entry
 
-    combined_manifest = existing_manifest + new_entries
+    combined_manifest = list(merged_dict.values())
     with open(manifest_path, "w", encoding="utf-8") as fp:
         json.dump(combined_manifest, fp, indent=2)
     print(f">> Manifest updated: {manifest_path} ({len(combined_manifest)} total traces recorded)\n")

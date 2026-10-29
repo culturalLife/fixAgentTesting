@@ -1,0 +1,119 @@
+[
+  {
+    "scenario": "A_cache_poisoning",
+    "execution_id": "ecom-stress-2f62dcff",
+    "trace_id": "c97fc5600c2ad8f0c5f8c5b68dc96380",
+    "claim_id": "CLM-7001",
+    "status": "REJECTED",
+    "approved_amount": 0.0,
+    "defect": "Stale fraud cache"
+  },
+  {
+    "scenario": "B_risk_threshold_bypass",
+    "execution_id": "ecom-stress-83d5ea12",
+    "trace_id": "8c271cee0142c93ca2b5b5878b4d687a",
+    "claim_id": "CLM-7002",
+    "status": "APPROVED",
+    "approved_amount": 1899.0,
+    "defect": "Risk 0.87 approved"
+  },
+  {
+    "scenario": "C_sku_substitution",
+    "execution_id": "ecom-stress-0d2c98ee",
+    "trace_id": "f6a00b36f7d378faee3d2f37ccd3937d",
+    "claim_id": "CLM-7003",
+    "status": "APPROVED",
+    "approved_amount": 0.0,
+    "defect": "SKU substituted"
+  },
+  {
+    "scenario": "D_float_ledger_drift",
+    "execution_id": "ecom-stress-6d03b74b",
+    "trace_id": "01405599ccd2183daeb045f788a5f1a7",
+    "claim_id": "CLM-7004",
+    "status": "APPROVED",
+    "approved_amount": 999.9920000000001,
+    "defect": "Float precision"
+  },
+  {
+    "scenario": "E_expired_policy_clause",
+    "execution_id": "ecom-stress-ea922869",
+    "trace_id": "b2711a6f7e8ce3c9271657436fc7c900",
+    "claim_id": "CLM-7005",
+    "status": "APPROVED",
+    "approved_amount": 340.0,
+    "defect": "Expired policy"
+  },
+  {
+    "scenario": "F_compliance_exception_swallow",
+    "execution_id": "ecom-stress-a0403dbc",
+    "trace_id": "e117239c265007cc42ee8a7aa2b77d6d",
+    "claim_id": "CLM-7006",
+    "status": "APPROVED",
+    "approved_amount": 2100.0,
+    "defect": "Compliance bypassed"
+  },
+  {
+    "scenario": "G_urgency_sla_downgrade",
+    "execution_id": "ecom-stress-b81e6c8f",
+    "trace_id": "5a395f30e99057154a3b00e7463a3c6c",
+    "claim_id": "CLM-7007",
+    "status": "APPROVED",
+    "approved_amount": 89.99,
+    "defect": "Critical SLA downgraded"
+  },
+  {
+    "scenario": "H_duplicate_refund_stale_read",
+    "execution_id": "ecom-stress-2fed8d88",
+    "trace_id": "99924c470beb9c2e2bf12aaf613ae71c",
+    "claim_id": "CLM-7008",
+    "status": "APPROVED",
+    "approved_amount": 599.0,
+    "defect": "Duplicate refund due to stale read"
+  },
+  {
+    "scenario": "I_execution_id_collision",
+    "execution_id": "ecom-stress-00a1b2c3",
+    "trace_id": "a70a7591ed54425985495f3c584b8869",
+    "claim_id": "CLM-7009A+CLM-7010B",
+    "status": "COLLISION",
+    "approved_amount": 0.0,
+    "defect": "ID collision"
+  },
+  {
+    "scenario": "J_fraud_queue_priority_zero",
+    "execution_id": "ecom-stress-c8dea944",
+    "trace_id": "90f3acc8b7df7e555847daf0822a8b4c",
+    "claim_id": "CLM-7010",
+    "status": "ESCALATED",
+    "approved_amount": 0.0,
+    "defect": "Priority 0"
+  },
+  {
+    "scenario": "K_user_cancelled_stop",
+    "execution_id": "ecom-stress-84d707e1",
+    "trace_id": "8e238c9439b7851836da878c2754e566",
+    "claim_id": "CLM-7011",
+    "status": "CANCELLED",
+    "approved_amount": 0.0,
+    "defect": "Natural stop"
+  },
+  {
+    "scenario": "L_system_termination",
+    "execution_id": "ecom-stress-27b91c19",
+    "trace_id": "1deff09735eab936fb27edbaaf243e54",
+    "claim_id": "CLM-7012",
+    "status": "TERMINATION",
+    "approved_amount": 0.0,
+    "defect": "Force stop"
+  },
+  {
+    "scenario": "M_workflow_crash",
+    "execution_id": "ecom-stress-9604dcb8",
+    "trace_id": "cce880298bcbd501012770e5c7c98126",
+    "claim_id": "CLM-7013",
+    "status": "FAILED",
+    "approved_amount": 0.0,
+    "defect": "Crash"
+  }
+]

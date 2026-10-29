@@ -134,6 +134,8 @@ def handoff_span(
         span.set_attribute("gen_ai.activity.status", "SUCCESS")
         span.set_attribute("status_code", "Ok")
         span.set_attribute("wf.activity.attempt", attempt)
+        span.set_attribute("gen_ai.agent.retry_attempt", attempt)
+        span.set_attribute("agent.metadata.attempt", str(attempt))
 
         if workflow_name:
             span.set_attribute("gen_ai.workflow.name", workflow_name)
@@ -158,15 +160,26 @@ def handoff_span(
             if input_tokens is not None:
                 span.set_attribute("gen_ai.usage.input_tokens", input_tokens)
                 span.set_attribute("usage_input_tokens", input_tokens)
+                span.set_attribute("input_tokens", input_tokens)
             if output_tokens is not None:
                 span.set_attribute("gen_ai.usage.output_tokens", output_tokens)
                 span.set_attribute("usage_output_tokens", output_tokens)
+                span.set_attribute("output_tokens", output_tokens)
+            if input_tokens is not None or output_tokens is not None:
+                in_val = input_tokens or 0
+                out_val = output_tokens or 0
+                span.set_attribute("tokens", in_val + out_val)
+                span.set_attribute("gen_ai.usage.total_tokens", in_val + out_val)
             if cache_read_tokens is not None:
                 span.set_attribute("gen_ai.usage.cache_read_input_tokens", cache_read_tokens)
                 span.set_attribute("usage_cache_read_input_tokens", cache_read_tokens)
+                span.set_attribute("cache_read_tokens", cache_read_tokens)
+                span.set_attribute("cache_read_input_tokens", cache_read_tokens)
             if cache_creation_tokens is not None:
                 span.set_attribute("gen_ai.usage.cache_creation_input_tokens", cache_creation_tokens)
                 span.set_attribute("usage_cache_creation_input_tokens", cache_creation_tokens)
+                span.set_attribute("cache_write_tokens", cache_creation_tokens)
+                span.set_attribute("cache_creation_input_tokens", cache_creation_tokens)
 
         span.set_token_usage = set_token_usage
 

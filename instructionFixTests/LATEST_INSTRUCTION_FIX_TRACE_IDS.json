@@ -1,0 +1,672 @@
+{
+  "generated_at": "2026-10-29T11:13:07",
+  "agents": {
+    "CareIntakeAgent": "ag_01a18629abe8728184b9a87400e7f90e",
+    "FulfilmentAgent": "ag_01a18629ad5b748bbcfc72ab297caa4e",
+    "RefundAgent": "ag_01a18629aee671bea47a4bd9d76602ff",
+    "ReturnsSummaryAgent": "ag_01a18629b165714a9bd039e599e86d9d",
+    "PayoutAgent": "ag_01a18629b29376ff83a2184ee2381b07",
+    "SettlementAgent": "ag_01a18629b3db7326837f1276c5bf38be",
+    "TriageClassifierAgent": "ag_01a18629b55173b8ba70f2ca6796b220",
+    "AutoReplyAgent": "ag_01a18629b6af77f5825bceca107918fa",
+    "ClaimRiskAgent": "ag_01a18629b7ee71b7a7669af3ea6a07e6",
+    "PickupSchedulingAgent": "ag_01a18629ba4f74a38762825f61c327b8"
+  },
+  "runs": [
+    {
+      "workflow": "damaged_delivery",
+      "ticket_id": "CS-10231",
+      "execution_id": "nw-damaged-delivery-685eb3a4",
+      "trace_id": "e16fcb2eae9ad824a33e53ace4a07d65",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-48977"
+          },
+          "ok": true
+        },
+        {
+          "name": "open_carrier_claim",
+          "arguments": {
+            "order_id": "NW-48977",
+            "description": "Dented lamp shade and rattling switch, box appeared dropped"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "damaged_delivery",
+      "ticket_id": "CS-10231",
+      "execution_id": "nw-damaged-delivery-a14f8ea3",
+      "trace_id": "373b079b14cf0464d90c86948e91f383",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-48977"
+          },
+          "ok": true
+        },
+        {
+          "name": "open_carrier_claim",
+          "arguments": {
+            "order_id": "NW-48977",
+            "description": "Dented lamp shade and rattling switch, box appeared dropped"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "damaged_delivery",
+      "ticket_id": "CS-10244",
+      "execution_id": "nw-damaged-delivery-d7c4b52b",
+      "trace_id": "e2a5c77ef6b7b70cf962df8954e7f8d3",
+      "status": "FAILED",
+      "error": "Fulfilment step finished without retrieving an order record",
+      "tool_calls": []
+    },
+    {
+      "workflow": "damaged_delivery",
+      "ticket_id": "CS-10244",
+      "execution_id": "nw-damaged-delivery-bc2de6c1",
+      "trace_id": "4e00b53bdcb695ad68d48fb3a2e83b63",
+      "status": "FAILED",
+      "error": "Fulfilment step finished without retrieving an order record",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-11111"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "refund_request",
+      "ticket_id": "CS-10302",
+      "execution_id": "nw-refund-request-61e46e9b",
+      "trace_id": "6a2b02b62ff942814746118b86c5eca4",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-51240"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-51240",
+            "sku": "HDP-NC7",
+            "amount": 89.99,
+            "reason": "Defective product"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "refund_request",
+      "ticket_id": "CS-10302",
+      "execution_id": "nw-refund-request-371f93fa",
+      "trace_id": "9d4da3cb07007b5cd24020fcf7c95fb4",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-51240"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-51240",
+            "sku": "HDP-NC7",
+            "amount": 89.99,
+            "reason": "Defective earcup"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "refund_request",
+      "ticket_id": "CS-10317",
+      "execution_id": "nw-refund-request-e1c9e4da",
+      "trace_id": "b74d6eb95ae5e70d151a9b7f5e95f22e",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-51102"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-51102",
+            "sku": "LTP-15P",
+            "amount": 1899,
+            "reason": "Defective"
+          },
+          "ok": false
+        },
+        {
+          "name": "escalate_to_supervisor",
+          "arguments": {
+            "order_id": "NW-51102",
+            "amount": 1899,
+            "reason": "Defective"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "refund_request",
+      "ticket_id": "CS-10317",
+      "execution_id": "nw-refund-request-993a7100",
+      "trace_id": "25af8fc0880bac798367777e2aedcb9a",
+      "status": "FAILED",
+      "error": "Refund case closed without a refund or an escalation",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-51102"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-51102",
+            "sku": "LTP-15P",
+            "amount": 1899,
+            "reason": "Defective product"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "return_payout",
+      "ticket_id": "CS-10405",
+      "execution_id": "nw-return-payout-772193d8",
+      "trace_id": "d71d76a6200dcdb3be12010e33b734b6",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-49611"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-49611",
+            "sku": "CTB-OAK",
+            "amount": 32,
+            "reason": "Oak cutting board returned because it split after washing"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "return_payout",
+      "ticket_id": "CS-10405",
+      "execution_id": "nw-return-payout-9579418f",
+      "trace_id": "170d5ac9476c60889d356b2f77cc4d94",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-49611"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-49611",
+            "sku": "CTB-OAK",
+            "amount": 32,
+            "reason": "Oak cutting board returned because it split after washing"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "return_payout",
+      "ticket_id": "CS-10411",
+      "execution_id": "nw-return-payout-5da0d9a7",
+      "trace_id": "10da031debcc66ce24e09554d1b8db5e",
+      "status": "FAILED",
+      "error": "Return closed without a payout",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-49530"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-49530",
+            "sku": "BLD-15",
+            "amount": 145,
+            "reason": "Jug cracked on first use"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "return_payout",
+      "ticket_id": "CS-10411",
+      "execution_id": "nw-return-payout-607e63e6",
+      "trace_id": "9e7427cc1afd3370251bea547eaf3225",
+      "status": "FAILED",
+      "error": "Return closed without a payout",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-49530"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-49530",
+            "sku": "BLD-15",
+            "amount": 145,
+            "reason": "Jug cracked on first use"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "bundle_return",
+      "ticket_id": "CS-10502",
+      "execution_id": "nw-bundle-return-d4fe0fb0",
+      "trace_id": "b3d50bc7ca2d610afc9222ea18c3830d",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-50402"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-50402",
+            "sku": "MSE-02",
+            "amount": 64,
+            "reason": "Customer opened the item but it didn't meet their expectations"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "bundle_return",
+      "ticket_id": "CS-10502",
+      "execution_id": "nw-bundle-return-fefa0c2f",
+      "trace_id": "d4f37a8e7474124a66542e9515ef1cb2",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-50402"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-50402",
+            "sku": "MSE-02",
+            "amount": 64,
+            "reason": "unopened return"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "bundle_return",
+      "ticket_id": "CS-10518",
+      "execution_id": "nw-bundle-return-f091ce8f",
+      "trace_id": "e9270faeb91c66a0bb508858d8f0a0f4",
+      "status": "FAILED",
+      "error": "Return closed without a refund",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-50388"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-50388",
+            "sku": "MSE-02",
+            "amount": 64,
+            "reason": "customer prefers their own"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "bundle_return",
+      "ticket_id": "CS-10518",
+      "execution_id": "nw-bundle-return-39fb7a6c",
+      "trace_id": "61c886a94196eff7d50672e34a7abca4",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-50388"
+          },
+          "ok": true
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-50388",
+            "sku": "MSE-02",
+            "amount": 64,
+            "reason": "Customer already has a preferred wireless mouse"
+          },
+          "ok": false
+        },
+        {
+          "name": "issue_refund",
+          "arguments": {
+            "order_id": "NW-50388",
+            "sku": "MSE-02",
+            "amount": 52.37,
+            "reason": "Customer already has a preferred wireless mouse"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "inbound_triage",
+      "ticket_id": "CS-10620",
+      "execution_id": "nw-inbound-triage-b83b340e",
+      "trace_id": "087943630570e306472b2040c1e0ff22",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-52019"
+          },
+          "ok": true
+        },
+        {
+          "name": "create_return_label",
+          "arguments": {
+            "order_id": "NW-52019",
+            "sku": "CSE-P14",
+            "item_condition": "damaged"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "inbound_triage",
+      "ticket_id": "CS-10620",
+      "execution_id": "nw-inbound-triage-50774c3b",
+      "trace_id": "1708d996a4e615abfc5f09e1c159871e",
+      "status": "COMPLETED",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-52019"
+          },
+          "ok": true
+        },
+        {
+          "name": "create_return_label",
+          "arguments": {
+            "order_id": "NW-52019",
+            "sku": "CSE-P14",
+            "item_condition": "opened"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "inbound_triage",
+      "ticket_id": "CS-10633",
+      "execution_id": "nw-inbound-triage-13a4d5d0",
+      "trace_id": "94c07eefa4042ad237427b0a08434c06",
+      "status": "FAILED",
+      "error": "Damaged-item reply sent without a return label",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-52007"
+          },
+          "ok": true
+        },
+        {
+          "name": "create_return_label",
+          "arguments": {
+            "order_id": "NW-52007",
+            "sku": "PWB-20K",
+            "item_condition": "damaged"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "inbound_triage",
+      "ticket_id": "CS-10633",
+      "execution_id": "nw-inbound-triage-aeb537bd",
+      "trace_id": "9cdf664077f6a90ae2dd003609eb065f",
+      "status": "FAILED",
+      "error": "Damaged-item reply sent without a return label",
+      "tool_calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "NW-52007"
+          },
+          "ok": true
+        },
+        {
+          "name": "create_return_label",
+          "arguments": {
+            "order_id": "NW-52007",
+            "sku": "PWB-20K",
+            "item_condition": "damaged"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "claim_risk",
+      "ticket_id": "CS-10701",
+      "execution_id": "nw-claim-risk-840d8987",
+      "trace_id": "98dc351f90ca0daad90f0b48f3a141e2",
+      "status": "FAILED",
+      "error": "Could not read risk assessment from ClaimRiskAgent: JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+      "tool_calls": [
+        {
+          "name": "get_claim_history",
+          "arguments": {
+            "customer_id": "C-4410"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "claim_risk",
+      "ticket_id": "CS-10701",
+      "execution_id": "nw-claim-risk-e4e00bff",
+      "trace_id": "70df3ec0115bc7ee7d408155f0cf0dd8",
+      "status": "FAILED",
+      "error": "Could not read risk assessment from ClaimRiskAgent: JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+      "tool_calls": [
+        {
+          "name": "get_claim_history",
+          "arguments": {
+            "customer_id": "C-4410"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "claim_risk",
+      "ticket_id": "CS-10719",
+      "execution_id": "nw-claim-risk-1262e8df",
+      "trace_id": "ba152812a0d9d3806089edba95759bd1",
+      "status": "FAILED",
+      "error": "Could not read risk assessment from ClaimRiskAgent: JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+      "tool_calls": [
+        {
+          "name": "get_claim_history",
+          "arguments": {
+            "customer_id": "C-4498"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "claim_risk",
+      "ticket_id": "CS-10719",
+      "execution_id": "nw-claim-risk-26814fd2",
+      "trace_id": "be622495b68f54d8451bac8965ff326c",
+      "status": "FAILED",
+      "error": "Could not read risk assessment from ClaimRiskAgent: JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+      "tool_calls": [
+        {
+          "name": "get_claim_history",
+          "arguments": {
+            "customer_id": "C-4498"
+          },
+          "ok": true
+        }
+      ]
+    },
+    {
+      "workflow": "courier_pickup",
+      "ticket_id": "CS-10804",
+      "execution_id": "nw-courier-pickup-2037bcc4",
+      "trace_id": "321508b94fbb7c042aadca1ced66b049",
+      "status": "FAILED",
+      "error": "Collection was not booked",
+      "tool_calls": [
+        {
+          "name": "schedule_pickup",
+          "arguments": {
+            "order_id": "NW-54012",
+            "pickup_date": "03/11/2026",
+            "postcode": "LS6 2QT"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "courier_pickup",
+      "ticket_id": "CS-10804",
+      "execution_id": "nw-courier-pickup-b682e66c",
+      "trace_id": "cfd7f5bc23a14561e090b8b5b73858b8",
+      "status": "FAILED",
+      "error": "Collection was not booked",
+      "tool_calls": [
+        {
+          "name": "schedule_pickup",
+          "arguments": {
+            "order_id": "NW-54012",
+            "pickup_date": "03/11/2026",
+            "postcode": "LS6 2QT"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "courier_pickup",
+      "ticket_id": "CS-10811",
+      "execution_id": "nw-courier-pickup-b8943c74",
+      "trace_id": "3acabfd26687385ddf2e4d0a449e9a86",
+      "status": "FAILED",
+      "error": "Collection was not booked",
+      "tool_calls": [
+        {
+          "name": "schedule_pickup",
+          "arguments": {
+            "order_id": "NW-54088",
+            "postcode": "BS3 1AX",
+            "pickup_date": "05/11/2026"
+          },
+          "ok": false
+        }
+      ]
+    },
+    {
+      "workflow": "courier_pickup",
+      "ticket_id": "CS-10811",
+      "execution_id": "nw-courier-pickup-6007406f",
+      "trace_id": "a31a50951cb8dba87edf9a5df25be4e1",
+      "status": "FAILED",
+      "error": "Collection was not booked",
+      "tool_calls": [
+        {
+          "name": "schedule_pickup",
+          "arguments": {
+            "order_id": "NW-54088",
+            "pickup_date": "05/11/2026",
+            "postcode": "BS3 1AX"
+          },
+          "ok": false
+        }
+      ]
+    }
+  ]
+}

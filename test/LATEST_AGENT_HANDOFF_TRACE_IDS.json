@@ -1,0 +1,82 @@
+[
+  {
+    "scenario": "1_missing_required_identifier",
+    "execution_id": "handoff-err-69021460",
+    "trace_id": "03cfcb124bab9f8e56ae70aaf717e04b",
+    "status": "FAILED",
+    "defect_type": "omitted_mandatory_schema_field",
+    "root_cause": "Intake agent prompt omitted instruction to forward order_id"
+  },
+  {
+    "scenario": "2_ambiguous_policy_threshold",
+    "execution_id": "handoff-err-f08c803c",
+    "trace_id": "2a0e83a5eac18dbad5dc3a7e8e9b14ff",
+    "status": "POLICY_BREACH",
+    "defect_type": "missing_numerical_boundary_threshold",
+    "root_cause": "System prompt lacked explicit $250 upper limit constraint"
+  },
+  {
+    "scenario": "3_conflicting_agent_guardrails",
+    "execution_id": "handoff-err-dc4a3304",
+    "trace_id": "f9eb4943e512485bd9f7ef58f193fbac",
+    "status": "DEADLOCK",
+    "defect_type": "conflicting_instructions",
+    "root_cause": "Intake agent instructed to promise replacement; fulfillment instructed to strictly require return"
+  },
+  {
+    "scenario": "4_dropped_negative_constraint",
+    "execution_id": "handoff-err-47c97024",
+    "trace_id": "b7d1f2e063106d0171484c6d170b0a45",
+    "status": "FAILED",
+    "defect_type": "dropped_negative_constraint",
+    "root_cause": "Handoff prompt dropped negative constraint 'DO NOT refund to credit card'"
+  },
+  {
+    "scenario": "5_unsupported_tool_instruction",
+    "execution_id": "handoff-err-10abd1d6",
+    "trace_id": "465aad412b1b6f25a6e38a70f8045d77",
+    "status": "FAILED",
+    "defect_type": "hallucinated_tool_binding",
+    "root_cause": "System prompt instructed agent to invoke a non-existent/unsupported tool"
+  },
+  {
+    "scenario": "6_unrendered_template_variables",
+    "execution_id": "handoff-err-b832e3a7",
+    "trace_id": "6a3085f0002cdd074648f94d1e14cd52",
+    "status": "DEGRADED",
+    "defect_type": "unrendered_template_tokens",
+    "root_cause": "System prompt contains unresolved {{...}} template tokens"
+  },
+  {
+    "scenario": "7_semantic_drift_multi_hop",
+    "execution_id": "handoff-err-3c3ee9a9",
+    "trace_id": "ffe38dfe220e45115120cc96f53c2545",
+    "status": "FALSE_REJECTION",
+    "defect_type": "semantic_information_decay",
+    "root_cause": "Successive handoff summaries stripped the manufacturing defect nuance, turning into physical wear rejection"
+  },
+  {
+    "scenario": "8_incomplete_bundle_instruction",
+    "execution_id": "handoff-err-6ca45224",
+    "trace_id": "08ae8806f92d8028d0c15924f575d368",
+    "status": "FINANCIAL_DISCREPANCY",
+    "defect_type": "missing_partial_bundle_proration",
+    "root_cause": "Instruction lacked formula for partial bundle returns, triggering 95% order refund for a mouse"
+  },
+  {
+    "scenario": "9_omitted_legal_escalation",
+    "execution_id": "handoff-err-437fdb55",
+    "trace_id": "e73f6cd7f98797e5ed47992f0d00bd21",
+    "status": "COMPLIANCE_BREACH",
+    "defect_type": "omitted_legal_and_safety_routing",
+    "root_cause": "System prompt lacked triage clause for bodily injury / regulatory legal threats"
+  },
+  {
+    "scenario": "10_malformed_schema_handoff",
+    "execution_id": "handoff-err-18670e3b",
+    "trace_id": "d3bff856a98aeca3b3bbc7a69a9b9e73",
+    "status": "FAILED",
+    "defect_type": "missing_json_schema_enforcement",
+    "root_cause": "System prompt lacked JSON schema enforcement, resulting in prose text crashing downstream parser"
+  }
+]
